@@ -24,7 +24,7 @@ static uart *g_usart[ 5 ];
  **********************************************************************************************************************************/
 
 #define TX_BUFF_SZ 32
-#define RX_BUFF_SZ 128
+#define RX_BUFF_SZ 256
 
 uart::uart(	uint8_t  numUart, uint8_t portTx ,uint8_t pinTx , uint8_t portRx , uint8_t pinRx ,
             uint32_t baudrate, bits_datos_t BitsDeDatos, paridad_t paridad)
@@ -208,7 +208,8 @@ uint32_t stat = m_usart->STAT ;
 	//--- Proceso de Recepcion
 	while (stat & (DATAREADY))
 	{
-		datoRx = ( uint8_t ) m_usart->RXDAT;
+		const uint32_t rxDataStat = m_usart->RXDATSTAT;
+		datoRx = ( uint8_t ) rxDataStat;
 
 		if (!m_buffRx.push(datoRx)) {
 			m_rxDropped++;
