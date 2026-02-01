@@ -83,6 +83,15 @@ uart::uart(	uint8_t  numUart, uint8_t portTx ,uint8_t pinTx , uint8_t portRx , u
 
 	NVIC->ISER[0] = ( 1 << prxUart[numUart].iser ); 	// habilitamos UART_IRQ
 
+	// Asegura mayor prioridad para RX y reducir overruns en ráfagas.
+	{
+		const uint8_t irq = prxUart[numUart].iser;
+		const uint8_t index = irq >> 2;
+		const uint8_t shift = (irq & 0x03u) * 8u;
+		const uint32_t mask = 0xFFu << shift;
+		NVIC->IP[index] = (NVIC->IP[index] & ~mask) | (0u << shift);
+	}
+
 	m_usart->CFG |= ( 1 << 0 );			// habilitamos USART
 
 
