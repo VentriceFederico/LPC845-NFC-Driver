@@ -70,6 +70,9 @@ int main(void) {
 	if(state){
 		lcd->Set("NFC Listo!      ", 1, 0);
 		L1.On();
+	} else {
+		lcd->Set("NFC Error WakeUP!", 1, 0);
+		L1.Blink();
 	}
 
     bool lecturaEnCurso = false;

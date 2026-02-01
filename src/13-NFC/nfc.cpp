@@ -36,11 +36,13 @@ void nfc::Tick() {
     const uint32_t currentOverruns = getRxOverruns();
     if (currentOverruns != m_lastRxOverruns) {
         m_lastRxOverruns = currentOverruns;
+       /*
         m_parserState = ParserState_t::PREAMBLE;
         m_rxIndex = 0;
         m_msgLen = 0;
         m_checksum = 0;
         clearRxBuffer();
+    	*/
     }
 
     uint8_t byte;
