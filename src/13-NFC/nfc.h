@@ -106,6 +106,8 @@ private:
 	uint8_t 	m_uid[7];
 	uint8_t 	m_uidLen;
 	uint8_t 	m_lastCommandSent; // Para saber qué respuesta esperamos
+	uint32_t 	m_lastRxOverruns;
+	bool 		m_wakeupConfirmed;
 
 	// Métodos Internos
 	void processByte(uint8_t byte);
