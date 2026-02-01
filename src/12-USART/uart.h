@@ -104,6 +104,7 @@ class uart
 		uint32_t getRxErrors() const { return m_rxErrors; }
 		void clearRxBuffer() { m_buffRx.clear(); }
 
+
 		// Add para test
 		int qtty(){	return m_buffTx.qtty();		}
 
@@ -115,4 +116,3 @@ class uart
 };
 
 #endif /* I1_USART_UART_H_ */
-

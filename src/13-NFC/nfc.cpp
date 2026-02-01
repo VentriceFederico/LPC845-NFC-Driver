@@ -22,6 +22,7 @@ nfc::nfc(uint8_t uartNum, uint8_t portTx, uint8_t pinTx, uint8_t portRx, uint8_t
     m_uidLen = 0;
     m_lastCommandSent = 0;
     m_lastRxOverruns = 0;
+    m_wakeupConfirmed = false;
     memset(m_uid, 0, sizeof(m_uid));
 }
 
@@ -186,6 +187,7 @@ void nfc::onFrameReceived() {
              m_rxBuffer[0] == (PN532_COMMAND_SAMCONFIGURATION + 1))
     {
         // WakeUp exitoso confirmado
+        m_wakeupConfirmed = true;
         m_nfcState = NfcState_t::IDLE;
     }
 }
@@ -207,6 +209,27 @@ void nfc::sendWakeUp() {
 
 	m_lastCommandSent = PN532_COMMAND_SAMCONFIGURATION;
 	m_nfcState = NfcState_t::WAITING_ACK;
+}
+
+/**
+ * @brief Envía WakeUp y espera la respuesta completa (ACK + trama SAMConfig).
+ * Reintenta una vez si no se recibe la trama completa.
+ */
+bool nfc::wakeUp() {
+    const uint8_t maxAttempts = 2;
+    for (uint8_t attempt = 0; attempt < maxAttempts; ++attempt) {
+        m_wakeupConfirmed = false;
+        sendWakeUp();
+
+        for (uint32_t guard = 0; guard < 200000; ++guard) {
+            Tick();
+            if (m_wakeupConfirmed) {
+                return true;
+            }
+        }
+    }
+
+    return false;
 }
 
 /**
