@@ -134,6 +134,15 @@ public:
     	return m_cont == m_size;
     }
 
+    void clear()
+    {
+        CriticalSection cs;
+        m_idx1 = 0;
+        m_idx2 = 0;
+        m_cont = 0;
+        m_newLineDetected = false;
+    }
+
     // Obtener el tamaño en la cola
     int size() const { return m_size; }
 

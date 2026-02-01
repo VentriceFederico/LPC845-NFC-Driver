@@ -77,6 +77,9 @@ class uart
 		bool m_flagTx;
 
 		uint8_t x_num;
+		volatile uint32_t m_rxOverruns;
+		volatile uint32_t m_rxDropped;
+		volatile uint32_t m_rxErrors;
 
 	public:
 		typedef enum  { NoParidad , par = 2, impar} paridad_t;
@@ -96,6 +99,10 @@ class uart
 
 		void UART_IRQHandler (void);
 
+		uint32_t getRxOverruns() const { return m_rxOverruns; }
+		uint32_t getRxDropped() const { return m_rxDropped; }
+		uint32_t getRxErrors() const { return m_rxErrors; }
+		void clearRxBuffer() { m_buffRx.clear(); }
 
 
 		// Add para test
@@ -109,5 +116,3 @@ class uart
 };
 
 #endif /* I1_USART_UART_H_ */
-
-

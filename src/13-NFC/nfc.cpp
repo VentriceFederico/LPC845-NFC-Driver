@@ -21,6 +21,7 @@ nfc::nfc(uint8_t uartNum, uint8_t portTx, uint8_t pinTx, uint8_t portRx, uint8_t
     m_cardPresent = false;
     m_uidLen = 0;
     m_lastCommandSent = 0;
+    m_lastRxOverruns = 0;
     memset(m_uid, 0, sizeof(m_uid));
 }
 
@@ -31,6 +32,16 @@ nfc::~nfc() { }
  * Procesa todos los bytes pendientes en la cola de recepción de la UART.
  */
 void nfc::Tick() {
+    const uint32_t currentOverruns = getRxOverruns();
+    if (currentOverruns != m_lastRxOverruns) {
+        m_lastRxOverruns = currentOverruns;
+        m_parserState = ParserState_t::PREAMBLE;
+        m_rxIndex = 0;
+        m_msgLen = 0;
+        m_checksum = 0;
+        clearRxBuffer();
+    }
+
     uint8_t byte;
     while (this->Receive(byte)) {
         processByte(byte);
