@@ -59,7 +59,8 @@ int main(void) {
     lcd->Set("Iniciando...    ", 1, 0);
 
     // 1. Despertar al módulo
-	bool state = my_nfc->wakeUp();
+	my_nfc->startWakeUp();
+	WakeUpStatus_t wakeStatus = WAKEUP_IN_PROGRESS;
 
 	// Espera inicial (500ms) usando el timer global
 	globalTimer.TimerStart(5);
@@ -67,7 +68,13 @@ int main(void) {
 		my_nfc->Tick();
 	}
 
-	if(state){
+	// Esperar confirmación sin bloquear la FSM interna
+	while (wakeStatus == WAKEUP_IN_PROGRESS) {
+		my_nfc->Tick();
+		wakeStatus = my_nfc->getWakeUpStatus();
+	}
+
+	if(wakeStatus == WAKEUP_OK){
 		lcd->Set("NFC Listo!      ", 1, 0);
 		L1.On();
 	} else {
