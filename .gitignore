@@ -1,0 +1,19 @@
+# --- Compilados y Binarios ---
+Debug/
+Release/
+build/
+*.o
+*.d
+*.su
+*.axf
+*.bin
+*.hex
+*.map
+
+# --- Archivos del IDE (Opcional: puedes quitarlos si quieres que otros importen el proyecto tal cual) ---
+.settings/
+*.launch
+
+# --- Archivos temporales de sistema ---
+.DS_Store
+Thumbs.db
