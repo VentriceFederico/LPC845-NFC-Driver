@@ -46,6 +46,9 @@ uart::uart(	uint8_t  numUart, uint8_t portTx ,uint8_t pinTx , uint8_t portRx , u
 	};
 
 	x_num=numUart;
+	m_rxOverruns = 0;
+	m_rxDropped = 0;
+	m_rxErrors = 0;
 
 //==================================================
 // ---- configuracion de parametros intrinsecos ----
@@ -79,6 +82,15 @@ uart::uart(	uint8_t  numUart, uint8_t portTx ,uint8_t pinTx , uint8_t portRx , u
 	m_usart->INTENSET = DATAREADY;			// RX interrupcion
 
 	NVIC->ISER[0] = ( 1 << prxUart[numUart].iser ); 	// habilitamos UART_IRQ
+
+	// Asegura mayor prioridad para RX y reducir overruns en ráfagas.
+	{
+		const uint8_t irq = prxUart[numUart].iser;
+		const uint8_t index = irq >> 2;
+		const uint8_t shift = (irq & 0x03u) * 8u;
+		const uint32_t mask = 0xFFu << shift;
+		NVIC->IP[index] = (NVIC->IP[index] & ~mask) | (0u << shift);
+	}
 
 	m_usart->CFG |= ( 1 << 0 );			// habilitamos USART
 
@@ -181,6 +193,10 @@ uint32_t stat = m_usart->STAT ;
 
 	if (stat & MASK_UART_ERROR) // MASK_UART_ERROR incluye OVERRUN, FRAMERR, PARITY, BREAK
 		{
+			m_rxErrors++;
+			if (stat & MASK_OVERRUNINT) {
+				m_rxOverruns++;
+			}
 			m_usart->STAT = MASK_UART_ERROR; // Escribir 1 para limpiar flags W1C
 
 			// Opcional: Podrías contar errores aquí para debug
@@ -190,11 +206,14 @@ uint32_t stat = m_usart->STAT ;
 		}
 
 	//--- Proceso de Recepcion
-	if( stat & (DATAREADY) )
+	while (stat & (DATAREADY))
 	{
 		datoRx = ( uint8_t ) m_usart->RXDAT;
 
-		m_buffRx.push(datoRx);
+		if (!m_buffRx.push(datoRx)) {
+			m_rxDropped++;
+		}
+		stat = m_usart->STAT;
 	}
 
 	//--- Proceso de Transmision
@@ -270,4 +289,3 @@ void  PININT7_IRQHandler ( void )
 	g_usart[ 4 ]->UART_IRQHandler();
 
 }
-
