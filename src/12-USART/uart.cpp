@@ -46,6 +46,9 @@ uart::uart(	uint8_t  numUart, uint8_t portTx ,uint8_t pinTx , uint8_t portRx , u
 	};
 
 	x_num=numUart;
+	m_rxOverruns = 0;
+	m_rxDropped = 0;
+	m_rxErrors = 0;
 
 //==================================================
 // ---- configuracion de parametros intrinsecos ----
@@ -181,6 +184,10 @@ uint32_t stat = m_usart->STAT ;
 
 	if (stat & MASK_UART_ERROR) // MASK_UART_ERROR incluye OVERRUN, FRAMERR, PARITY, BREAK
 		{
+			m_rxErrors++;
+			if (stat & MASK_OVERRUNINT) {
+				m_rxOverruns++;
+			}
 			m_usart->STAT = MASK_UART_ERROR; // Escribir 1 para limpiar flags W1C
 
 			// Opcional: Podrías contar errores aquí para debug
@@ -190,11 +197,14 @@ uint32_t stat = m_usart->STAT ;
 		}
 
 	//--- Proceso de Recepcion
-	if( stat & (DATAREADY) )
+	while (stat & (DATAREADY))
 	{
 		datoRx = ( uint8_t ) m_usart->RXDAT;
 
-		m_buffRx.push(datoRx);
+		if (!m_buffRx.push(datoRx)) {
+			m_rxDropped++;
+		}
+		stat = m_usart->STAT;
 	}
 
 	//--- Proceso de Transmision
@@ -270,4 +280,3 @@ void  PININT7_IRQHandler ( void )
 	g_usart[ 4 ]->UART_IRQHandler();
 
 }
-
