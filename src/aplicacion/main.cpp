@@ -59,7 +59,7 @@ int main(void) {
     lcd->Set("Iniciando...    ", 1, 0);
 
     // 1. Despertar al módulo
-	my_nfc->sendWakeUp();
+	bool state = my_nfc->wakeUp();
 
 	// Espera inicial (500ms) usando el timer global
 	globalTimer.TimerStart(5);
@@ -67,8 +67,10 @@ int main(void) {
 		my_nfc->Tick();
 	}
 
-	lcd->Set("NFC Listo!      ", 1, 0);
-	L1.On();
+	if(state){
+		lcd->Set("NFC Listo!      ", 1, 0);
+		L1.On();
+	}
 
     bool lecturaEnCurso = false;
 	char lcdBuffer[17];
@@ -83,9 +85,6 @@ int main(void) {
 
 		if (!lecturaEnCurso) {
 			// --- FASE 1: INICIAR LECTURA ---
-
-			// CORRECCIÓN AQUÍ: Usamos (globalTimer) sin el '!'
-			// El operator bool() devuelve true si el timer VENCIO y lo detiene.
 			if (globalTimer) {
 				my_nfc->startReadPassiveTargetID();
 				lecturaEnCurso = true;
