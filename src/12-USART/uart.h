@@ -102,7 +102,7 @@ class uart
 		uint32_t getRxOverruns() const { return m_rxOverruns; }
 		uint32_t getRxDropped() const { return m_rxDropped; }
 		uint32_t getRxErrors() const { return m_rxErrors; }
-
+		void clearRxBuffer() { m_buffRx.clear(); }
 
 		// Add para test
 		int qtty(){	return m_buffTx.qtty();		}
