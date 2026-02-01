@@ -90,6 +90,15 @@ typedef enum {
 
 class nfc : public uart {
 private:
+
+	// --- VARIABLES PARA REINTENTO AUTOMÁTICO ---
+	uint8_t  m_lastCmdBuffer[64]; // Buffer para guardar el comando y reenviarlo
+	uint8_t  m_lastCmdLen;        // Longitud del comando guardado
+	bool     m_isWakeupCmd;       // Flag especial para el comando WakeUp
+	uint32_t m_retryTimer;        // Contador de "tiempo" (llamadas a Tick)
+
+	static const uint32_t RETRY_THRESHOLD = 100000;
+
 	// Variables de Estado FSM
 	NfcState_t 		m_nfcState;
 	ParserState_t 	m_parserState;
@@ -114,6 +123,7 @@ private:
 	void onFrameReceived(); // Se llama cuando llega una trama de datos válida
 	void onAckReceived();   // Se llama cuando llega un ACK válido
 	void sendCommand(const uint8_t* cmd, uint8_t len);
+	void retransmitLastCommand();
 
 public:
 

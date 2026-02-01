@@ -211,7 +211,7 @@ uint32_t stat = m_usart->STAT ;
 		const uint32_t rxDataStat = m_usart->RXDATSTAT;
 		datoRx = ( uint8_t ) rxDataStat;
 
-		if (!m_buffRx.push(datoRx)) {
+		if (!m_buffRx.pushFromIRQ(datoRx)){
 			m_rxDropped++;
 		}
 		stat = m_usart->STAT;

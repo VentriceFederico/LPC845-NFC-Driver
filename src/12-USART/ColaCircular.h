@@ -86,6 +86,24 @@ public:
 
 	}
 
+    bool pushFromIRQ(const T &item)
+	{
+		// 1. Verificamos si está llena (sin bloquear, lectura directa)
+		if (m_cont >= m_size)
+			return false;
+
+		// 2. Guardamos el dato
+		queue[m_idx2] = item;
+		m_idx2 = (m_idx2 + 1) % m_size;
+
+		// 3. Incrementamos SIN CriticalSection
+		// Esto es seguro porque la ISR interrumpe al Main (pop),
+		// pero el Main nunca interrumpe a la ISR.
+		m_cont++;
+
+		return true;
+	}
+
   //-----------------------------------------------------
     // New line enable
     void enableNewLine(newLineType_t mode=LF)

@@ -7,6 +7,8 @@
 // --- VARIABLES DE DEBUG GLOBAL ---
 DebugTrace_t g_nfcTrace[64];
 uint8_t g_traceHead = 0;
+volatile uint8_t g_rawBuffer[64];
+volatile uint32_t g_rawIdx = 0;
 
 // Constructor: Inicializa la UART y los estados
 nfc::nfc(uint8_t uartNum, uint8_t portTx, uint8_t pinTx, uint8_t portRx, uint8_t pinRx)
@@ -24,6 +26,12 @@ nfc::nfc(uint8_t uartNum, uint8_t portTx, uint8_t pinTx, uint8_t portRx, uint8_t
     m_lastRxOverruns = 0;
     m_wakeupConfirmed = false;
     memset(m_uid, 0, sizeof(m_uid));
+
+    // Inicialización de variables de reintento
+	m_retryTimer = 0;
+	m_lastCmdLen = 0;
+	m_isWakeupCmd = false;
+	memset(m_lastCmdBuffer, 0, sizeof(m_lastCmdBuffer));
 }
 
 nfc::~nfc() { }
@@ -33,21 +41,35 @@ nfc::~nfc() { }
  * Procesa todos los bytes pendientes en la cola de recepción de la UART.
  */
 void nfc::Tick() {
-    const uint32_t currentOverruns = getRxOverruns();
-    if (currentOverruns != m_lastRxOverruns) {
-        m_lastRxOverruns = currentOverruns;
-       /*
-        m_parserState = ParserState_t::PREAMBLE;
-        m_rxIndex = 0;
-        m_msgLen = 0;
-        m_checksum = 0;
-        clearRxBuffer();
-    	*/
-    }
+
+	const uint32_t currentOverruns = getRxOverruns();
+	if (currentOverruns != m_lastRxOverruns) {
+		m_lastRxOverruns = currentOverruns;
+		// El reinicio forzado aquí puede estar rompiendo la trama válida
+		//m_parserState = ParserState_t::PREAMBLE;
+		//m_rxIndex = 0;
+		//m_checksum = 0;
+	}
+
 
     uint8_t byte;
-    while (this->Receive(byte)) {
-        processByte(byte);
+	while (this->Receive(byte)) {
+		processByte(byte);
+
+		// Si recibimos ALGO, reseteamos el timer de reintento para dar más tiempo
+		if (m_nfcState != NfcState_t::IDLE) {
+			 m_retryTimer = 0;
+		}
+	}
+
+	//Lógica de Reintento Automático (Timeout)
+    if (m_nfcState != NfcState_t::IDLE) {
+        m_retryTimer++;
+        if (m_retryTimer > RETRY_THRESHOLD) {
+            // ¡Timeout! No llegó respuesta. Reenviamos.
+            retransmitLastCommand();
+            m_retryTimer = 0; // Reiniciar cuenta
+        }
     }
 }
 
@@ -198,19 +220,20 @@ void nfc::onFrameReceived() {
  * @brief Envía comando WakeUp (0x55 0x55 ...).
  */
 void nfc::sendWakeUp() {
-    // Definimos el array
-	const uint8_t wake[] = {
-	        0x55, 0x55, 0x00, 0x00, 0x00, 0x00, 0x00, // Long Preamble
-	        0x00, 0xFF, 0x05, 0xFB, 0xD4, 0x14, 0x01, 0x14, 0x01, 0x02, 0x00 // SAMConfig
-	    };
+    // Marcamos que el último comando fue WakeUp (secuencia especial)
+    m_isWakeupCmd = true;
+    m_retryTimer = 0;
 
-    // --- CORRECCIÓN AQUÍ ---
-    // Hacemos cast explícito a (uint8_t) en el segundo argumento (tamaño)
-    // para que coincida con Transmit(uint8_t*, uint8_t)
-	this->Transmit((uint8_t*)wake, (uint8_t)sizeof(wake));
+    // Secuencia WakeUp Raw
+    const uint8_t wake[] = {
+            0x55, 0x55, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0xFF, 0x05, 0xFB, 0xD4, 0x14, 0x01, 0x14, 0x01, 0x02, 0x00
+    };
 
-	m_lastCommandSent = PN532_COMMAND_SAMCONFIGURATION;
-	m_nfcState = NfcState_t::WAITING_ACK;
+    this->Transmit((uint8_t*)wake, (uint8_t)sizeof(wake));
+
+    m_lastCommandSent = PN532_COMMAND_SAMCONFIGURATION;
+    m_nfcState = NfcState_t::WAITING_ACK;
 }
 
 /**
@@ -218,20 +241,44 @@ void nfc::sendWakeUp() {
  * Reintenta una vez si no se recibe la trama completa.
  */
 bool nfc::wakeUp() {
-    const uint8_t maxAttempts = 2;
-    for (uint8_t attempt = 0; attempt < maxAttempts; ++attempt) {
-        m_wakeupConfirmed = false;
-        sendWakeUp();
+    // 1. Enviamos la primera vez
+    m_wakeupConfirmed = false;
+    sendWakeUp();
 
-        for (uint32_t guard = 0; guard < 200000; ++guard) {
-            Tick();
-            if (m_wakeupConfirmed) {
-                return true;
-            }
-        }
+    // 2. Esperamos la confirmación.
+    // Gracias al cambio en Tick(), si no llega respuesta,
+    // Tick() se encargará de reenviar el comando automáticamente.
+    // Nosotros solo esperamos a que el flag se ponga en true.
+
+    uint32_t safetyGuard = 0;
+    // Un límite muy alto (ej. 2-3 segundos reales) por seguridad
+    const uint32_t MAX_WAIT = 5000000;
+
+    while (!m_wakeupConfirmed && safetyGuard < MAX_WAIT) {
+        Tick();
+        safetyGuard++;
     }
 
-    return false;
+    return m_wakeupConfirmed;
+}
+
+void nfc::retransmitLastCommand() {
+    if (m_isWakeupCmd) {
+        // Si era WakeUp, reenviamos la secuencia especial
+        const uint8_t wake[] = {
+             0x55, 0x55, 0x00, 0x00, 0x00, 0x00, 0x00,
+             0x00, 0xFF, 0x05, 0xFB, 0xD4, 0x14, 0x01, 0x14, 0x01, 0x02, 0x00
+        };
+        this->Transmit((uint8_t*)wake, (uint8_t)sizeof(wake));
+    } else {
+        // Si era comando normal, usamos sendCommand (que volverá a armar la trama)
+        // Nota: sendCommand reseteará el timer y volverá a guardar el buffer.
+        // Es un poco redundante copiar el buffer sobre sí mismo, pero es seguro.
+        sendCommand(m_lastCmdBuffer, m_lastCmdLen);
+    }
+
+    // Restauramos el estado esperado (por si acaso cambió erróneamente)
+    m_nfcState = NfcState_t::WAITING_ACK;
 }
 
 /**
@@ -252,21 +299,27 @@ void nfc::startReadPassiveTargetID() {
  * @brief Empaqueta y envía un comando según protocolo NXP.
  */
 void nfc::sendCommand(const uint8_t* cmd, uint8_t len) {
+    // 1. Guardar copia para reintentos
+    if (len <= sizeof(m_lastCmdBuffer)) {
+        memcpy(m_lastCmdBuffer, cmd, len);
+        m_lastCmdLen = len;
+    }
+    m_isWakeupCmd = false;
+    m_retryTimer = 0; // Reset timer
+
+    // 2. Construcción y Envío de la Trama (Código original)
     uint8_t frame[64];
     uint8_t idx = 0;
     uint8_t checksum = 0;
 
-    // 1. Preamble & Start
     frame[idx++] = PN532_PREAMBLE;
-    frame[idx++] = PN532_PREAMBLE; // A veces doble 00 ayuda a sincronizar
-    frame[idx++] = PN532_STARTCODE2; // 0xFF
+    frame[idx++] = PN532_PREAMBLE;
+    frame[idx++] = PN532_STARTCODE2;
 
-    // 2. Length (TFI + Data)
     uint8_t totalLen = len + 1;
     frame[idx++] = totalLen;
-    frame[idx++] = (uint8_t)(~totalLen + 1); // LCS
+    frame[idx++] = (uint8_t)(~totalLen + 1);
 
-    // 3. TFI & Data
     frame[idx++] = PN532_HOSTTOPN532;
     checksum += PN532_HOSTTOPN532;
 
@@ -275,7 +328,6 @@ void nfc::sendCommand(const uint8_t* cmd, uint8_t len) {
         checksum += cmd[i];
     }
 
-    // 4. DCS & Postamble
     frame[idx++] = (uint8_t)(~checksum + 1);
     frame[idx++] = PN532_POSTAMBLE;
 
