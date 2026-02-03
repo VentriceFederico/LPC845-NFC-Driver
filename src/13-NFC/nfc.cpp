@@ -9,8 +9,6 @@ DebugTrace_t g_nfcTrace[64];
 uint8_t g_traceHead = 0;
 volatile uint8_t g_rawBuffer[64];
 volatile uint32_t g_rawIdx = 0;
-NfcFrameLog_t g_nfcFrameLog[16];
-uint8_t g_frameLogHead = 0;
 
 // Constructor: Inicializa la UART y los estados
 nfc::nfc(uint8_t uartNum, uint8_t portTx, uint8_t pinTx, uint8_t portRx, uint8_t pinRx)
@@ -27,8 +25,6 @@ nfc::nfc(uint8_t uartNum, uint8_t portTx, uint8_t pinTx, uint8_t portRx, uint8_t
     m_lastCommandSent = 0;
     m_lastRxOverruns = 0;
     m_wakeupConfirmed = false;
-    m_wakeupStatus = WAKEUP_IDLE;
-    m_wakeupRetries = 0;
     memset(m_uid, 0, sizeof(m_uid));
 
     // Inicialización de variables de reintento
@@ -137,7 +133,6 @@ void nfc::processByte(uint8_t byte) {
 				m_parserState = ParserState_t::TFI;
 			} else {
 				// Error de checksum real (ruido o trama rota)
-				logFrame(NfcFrameLogType::ERROR, &byte, 1);
 				m_parserState = ParserState_t::PREAMBLE;
 			}
 			break;
@@ -167,7 +162,6 @@ void nfc::processByte(uint8_t byte) {
                 // Checksum de datos válido
             	m_parserState = ParserState_t::POSTAMBLE;
             } else {
-            	logFrame(NfcFrameLogType::ERROR, &byte, 1);
             	m_parserState = ParserState_t::PREAMBLE; // Checksum fail
             }
             break;
@@ -189,7 +183,6 @@ void nfc::processByte(uint8_t byte) {
  */
 void nfc::onAckReceived() {
     if (m_nfcState == NfcState_t::WAITING_ACK) {
-    	logFrame(NfcFrameLogType::ACK, nullptr, 0);
         // CAMBIO AQUI: Agregamos SAMCONFIGURATION a la lista
         if (m_lastCommandSent == PN532_COMMAND_INLISTPASSIVE ||
             m_lastCommandSent == PN532_COMMAND_SAMCONFIGURATION) { // <--- 0x14
@@ -210,7 +203,6 @@ void nfc::onFrameReceived() {
     {
         // ... (Tu código de lectura de UID sigue igual) ...
         // ...
-        logFrame(NfcFrameLogType::DATA, m_rxBuffer, m_rxIndex);
         m_nfcState = NfcState_t::IDLE;
     }
     // 2. Respuesta a WakeUp (SAMConfiguration)
@@ -220,28 +212,8 @@ void nfc::onFrameReceived() {
     {
         // WakeUp exitoso confirmado
         m_wakeupConfirmed = true;
-        m_wakeupStatus = WAKEUP_OK;
-        logFrame(NfcFrameLogType::DATA, m_rxBuffer, m_rxIndex);
         m_nfcState = NfcState_t::IDLE;
     }
-}
-
-void nfc::logFrame(NfcFrameLogType type, const uint8_t* data, uint8_t len) {
-	NfcFrameLog_t &entry = g_nfcFrameLog[g_frameLogHead];
-	entry.type = type;
-	entry.len = len;
-	entry.parserState = static_cast<uint8_t>(m_parserState);
-	entry.nfcState = static_cast<uint8_t>(m_nfcState);
-
-	const uint8_t copyLen = (len > sizeof(entry.data)) ? sizeof(entry.data) : len;
-	for (uint8_t i = 0; i < copyLen; i++) {
-		entry.data[i] = data ? data[i] : 0x00;
-	}
-	for (uint8_t i = copyLen; i < sizeof(entry.data); i++) {
-		entry.data[i] = 0x00;
-	}
-
-	g_frameLogHead = (g_frameLogHead + 1) % 16;
 }
 
 /**
@@ -251,7 +223,6 @@ void nfc::sendWakeUp() {
     // Marcamos que el último comando fue WakeUp (secuencia especial)
     m_isWakeupCmd = true;
     m_retryTimer = 0;
-    m_wakeupRetries = 0;
 
     // Secuencia WakeUp Raw
     const uint8_t wake[] = {
@@ -265,36 +236,34 @@ void nfc::sendWakeUp() {
     m_nfcState = NfcState_t::WAITING_ACK;
 }
 
-void nfc::startWakeUp() {
-	if (m_wakeupStatus == WAKEUP_IN_PROGRESS) {
-		return;
-	}
-
-	m_wakeupConfirmed = false;
-	m_wakeupStatus = WAKEUP_IN_PROGRESS;
-	sendWakeUp();
-}
-
 /**
- * @brief Inicia WakeUp si está en idle y retorna el estado actual (no bloqueante).
+ * @brief Envía WakeUp y espera la respuesta completa (ACK + trama SAMConfig).
+ * Reintenta una vez si no se recibe la trama completa.
  */
 bool nfc::wakeUp() {
-	if (m_wakeupStatus == WAKEUP_IDLE) {
-		startWakeUp();
-	}
+    // 1. Enviamos la primera vez
+    m_wakeupConfirmed = false;
+    sendWakeUp();
 
-	return (m_wakeupStatus == WAKEUP_OK);
+    // 2. Esperamos la confirmación.
+    // Gracias al cambio en Tick(), si no llega respuesta,
+    // Tick() se encargará de reenviar el comando automáticamente.
+    // Nosotros solo esperamos a que el flag se ponga en true.
+
+    uint32_t safetyGuard = 0;
+    // Un límite muy alto (ej. 2-3 segundos reales) por seguridad
+    const uint32_t MAX_WAIT = 5000000;
+
+    while (!m_wakeupConfirmed && safetyGuard < MAX_WAIT) {
+        Tick();
+        safetyGuard++;
+    }
+
+    return m_wakeupConfirmed;
 }
 
 void nfc::retransmitLastCommand() {
     if (m_isWakeupCmd) {
-    	if (m_wakeupRetries >= WAKEUP_MAX_RETRIES) {
-    		m_wakeupStatus = WAKEUP_FAILED;
-    		m_nfcState = NfcState_t::IDLE;
-    		m_isWakeupCmd = false;
-    		return;
-    	}
-    	m_wakeupRetries++;
         // Si era WakeUp, reenviamos la secuencia especial
         const uint8_t wake[] = {
              0x55, 0x55, 0x00, 0x00, 0x00, 0x00, 0x00,

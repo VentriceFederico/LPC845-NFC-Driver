@@ -68,23 +68,6 @@ struct DebugTrace_t {
 extern DebugTrace_t g_nfcTrace[64];
 extern uint8_t g_traceHead;
 
-enum class NfcFrameLogType : uint8_t {
-	ACK = 0,
-	DATA = 1,
-	ERROR = 2
-};
-
-struct NfcFrameLog_t {
-	NfcFrameLogType type;
-	uint8_t len;
-	uint8_t data[32];
-	uint8_t parserState;
-	uint8_t nfcState;
-};
-
-extern NfcFrameLog_t g_nfcFrameLog[16];
-extern uint8_t g_frameLogHead;
-
 // Gestion de Comandos
 typedef enum {
 	IDLE,
@@ -105,13 +88,6 @@ typedef enum {
 	POSTAMBLE
 } ParserState_t;
 
-typedef enum {
-	WAKEUP_IDLE,
-	WAKEUP_IN_PROGRESS,
-	WAKEUP_OK,
-	WAKEUP_FAILED
-} WakeUpStatus_t;
-
 class nfc : public uart {
 private:
 
@@ -122,7 +98,6 @@ private:
 	uint32_t m_retryTimer;        // Contador de "tiempo" (llamadas a Tick)
 
 	static const uint32_t RETRY_THRESHOLD = 100000;
-	static const uint8_t  WAKEUP_MAX_RETRIES = 3;
 
 	// Variables de Estado FSM
 	NfcState_t 		m_nfcState;
@@ -142,8 +117,6 @@ private:
 	uint8_t 	m_lastCommandSent; // Para saber qué respuesta esperamos
 	uint32_t 	m_lastRxOverruns;
 	bool 		m_wakeupConfirmed;
-	WakeUpStatus_t m_wakeupStatus;
-	uint8_t 	m_wakeupRetries;
 
 	// Métodos Internos
 	void processByte(uint8_t byte);
@@ -151,7 +124,6 @@ private:
 	void onAckReceived();   // Se llama cuando llega un ACK válido
 	void sendCommand(const uint8_t* cmd, uint8_t len);
 	void retransmitLastCommand();
-	void logFrame(NfcFrameLogType type, const uint8_t* data, uint8_t len);
 
 public:
 
@@ -164,7 +136,6 @@ public:
 	// --- Comandos de Usuario (No bloqueantes) ---
 	// Solo inician la transmisión. El resultado se verifica después con isCardPresent().
 	void 			sendWakeUp();
-	void 			startWakeUp();
 	void 			startReadPassiveTargetID();
 
 	// --- Getters de Estado ---
@@ -173,7 +144,6 @@ public:
 	const uint8_t* 	getUid() 			const { return m_uid; }
 
     bool 			wakeUp();
-    WakeUpStatus_t 	getWakeUpStatus() const { return m_wakeupStatus; }
     uint32_t 		getFirmwareVersion();
     bool 			readPassiveTargetID(uint8_t cardbaudrate, uint8_t *uid, uint8_t *uidLength);
 
