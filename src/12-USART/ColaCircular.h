@@ -12,195 +12,105 @@
 #include "LPC845.h"
  enum newLineType_t{CR,LF,CR_LF};
 
- class CriticalSection {
-     uint32_t primask_;
- public:
-     CriticalSection() {
-         __asm volatile(
-             "MRS %0, primask\n"
-             "cpsid i\n"
-             : "=r"(primask_) :: "memory");
-     }
-     ~CriticalSection() {
-         __asm volatile(
-             "MSR primask, %0\n"
-             :: "r"(primask_) : "memory");
-     }
- };
-
-
-
-
-
-
-template <typename T>
-class ColaCircular {
-
-public:
-
-
-private:
-
-    unsigned int m_idx1, m_idx2; // indices de insercion y extraccion
-    int m_size;  // tama#o definido por el usurario
-    T *queue;
-    volatile int m_cont; // Para llevar el conteo de elementos actuales
-
- //   bool m_flag;
-    bool m_newLineDetectEnable;
-    bool m_newLineDetected;
-    newLineType_t m_newLineType;
-
-    ColaCircular(const ColaCircular&);
-    ColaCircular& operator=(const ColaCircular&);
-
-
-    void incrementar()
-    {
-        CriticalSection cs; // interrupciones deshabilitadas
-        m_cont++;         // operación protegida
-        // interrupciones restauradas automáticamente al salir del bloque
-    }
-
-    void decrementar()
-    {
-        CriticalSection cs; // interrupciones deshabilitadas
-        m_cont--;         // operación protegida
-        // interrupciones restauradas automáticamente al salir del bloque
-    }
-
-
-
-
-public:
-
-    // Constructor para inicializar la cola con la capacidad dada
-    ColaCircular(int tama) : m_idx1(0), m_idx2(0) , m_cont(0)
-	{
-		m_size= tama>0? tama:10;
-        queue = new T[m_size];
-//        m_flag=false;
-        m_newLineDetectEnable=false;
-//        m_newLineDetected=false;
-//        m_newLineType=LF;
-
-	}
-
-    bool pushFromIRQ(const T &item)
-	{
-		// 1. Verificamos si está llena (sin bloquear, lectura directa)
-		if (m_cont >= m_size)
-			return false;
-
-		// 2. Guardamos el dato
-		queue[m_idx2] = item;
-		m_idx2 = (m_idx2 + 1) % m_size;
-
-		// 3. Incrementamos SIN CriticalSection
-		// Esto es seguro porque la ISR interrumpe al Main (pop),
-		// pero el Main nunca interrumpe a la ISR.
-		m_cont++;
-
-		return true;
-	}
-
-  //-----------------------------------------------------
-    // New line enable
-    void enableNewLine(newLineType_t mode=LF)
-    {
-        m_newLineDetectEnable=true;
-        m_newLineDetected=false;
-        m_newLineType=mode;
-    }
-
-    // New line enable
-    void disableNewLine()    { m_newLineDetectEnable=false;}
-
-    bool isNewLine() const  {return m_newLineDetected;}
-    void newLineClear() {m_newLineDetected=false;}
-    //-----------------------------------------------------
-
-
-
-    // Destructor para liberar la memoria
-    ~ColaCircular() {
-        delete[] queue;
-    }
-
-    // Agregar un elemento al final de la cola
-    bool push(const T &item);
-
-    //  devuelve y elimina el primer elemento de la cola
-    bool pop(T &val);
-
-    // Verificar si la cola está vacía
-    bool isEmpty()
-    {
-/*    	if (m_idx1==m_idx2 && !m_flag)
-    		return true;
-    	return false;*/
-    	return m_cont == 0;
-    }
-
-    // Verificar si la cola está llena
-    bool isFull() {
-    	/*
-    	if (m_idx1==m_idx2 && m_flag)
-    		return true;
-    	return false;
+ /*
+	 class CriticalSection {
+		 uint32_t primask_;
+	 public:
+		 CriticalSection() {
+			 __asm volatile(
+				 "MRS %0, primask\n"
+				 "cpsid i\n"
+				 : "=r"(primask_) :: "memory");
+		 }
+		 ~CriticalSection() {
+			 __asm volatile(
+				 "MSR primask, %0\n"
+				 :: "r"(primask_) : "memory");
+		 }
+	 };
 */
-    	return m_cont == m_size;
-    }
-
-    void clear()
-    {
-        CriticalSection cs;
-        m_idx1 = 0;
-        m_idx2 = 0;
-        m_cont = 0;
-        m_newLineDetected = false;
-    }
-
-    // Obtener el tamaño en la cola
-    int size() const { return m_size; }
-
-    // Obtener el número de elementos en la cola
-    int qtty() const { return m_cont;
- //   	 return ((m_idx2-m_idx1)+m_size)%m_size;
-    }
-};
-
-
-template <typename T>
-bool ColaCircular<T>::push(const T &item)
-{
-    if (isFull())
-        return false;
-
-    queue[m_idx2] = item;
-    // ERROR ORIGINAL: m_idx2++;
-    m_idx2 = (m_idx2 + 1) % m_size; // Forma correcta: avanza 1 posición circular
-
-    incrementar();
-    return true;
-}
 
 
 
-template <typename T>
-bool ColaCircular<T>::pop(T &val)
-{
-    if (isEmpty())
-        return false;
+ template <typename T, uint32_t N>
+ class ColaCircular {
 
-    val = queue[m_idx1];
-    // ERROR ORIGINAL: m_idx1++;
-    m_idx1 = (m_idx1 + 1) % m_size; // Forma correcta: avanza 1 posición circular
+ private:
+     volatile uint32_t m_head;
+     volatile uint32_t m_tail;
+     T queue[N]; // Array estático para evitar new/delete y fragmentación
 
-    decrementar();
-    return true;
-}
+     bool m_newLineDetectEnable;
+     volatile bool m_newLineDetected;
+     newLineType_t m_newLineType;
 
+     // MÁSCARA MÁGICA: Si N=256 (0x100), Mask=0xFF.
+     // (idx + 1) & 0xFF hace el wrap automático en 1 ciclo de reloj.
+     static const uint32_t MASK = N - 1;
 
+     inline uint32_t next_index(uint32_t idx) const {
+         return (idx + 1) & MASK;
+     }
+
+ public:
+     ColaCircular() : m_head(0), m_tail(0), m_newLineDetected(false) {
+         // Verificación estática de potencia de 2 (truco de compilador)
+         static_assert((N & (N - 1)) == 0, "El tamaño de ColaCircular debe ser potencia de 2");
+
+         m_newLineDetectEnable = false;
+         m_newLineType = LF;
+     }
+
+     ~ColaCircular() {} // No hay memoria dinámica que liberar
+
+     // ESTADO
+     inline bool isEmpty() const { return (m_head == m_tail); }
+     inline bool isFull() const { return (next_index(m_head) == m_tail); }
+
+     int qtty() const {
+         uint32_t head = m_head;
+         uint32_t tail = m_tail;
+         return (head - tail) & MASK;
+     }
+
+     // PRODUCER (ISR)
+     bool pushFromIRQ(const T &item) {
+         uint32_t next = next_index(m_head);
+
+         if (next == m_tail) return false; // Llena
+
+         queue[m_head] = item;
+         m_head = next; // Atomic store en 32-bit ARM
+
+         if (m_newLineDetectEnable && !m_newLineDetected) {
+             if (m_newLineType == LF && item == '\n') m_newLineDetected = true;
+             else if (m_newLineType == CR && item == '\r') m_newLineDetected = true;
+             else if (m_newLineType == CR_LF && item == '\n') m_newLineDetected = true;
+         }
+         return true;
+     }
+
+     bool push(const T &item) { return pushFromIRQ(item); }
+
+     // CONSUMER
+     bool pop(T &val) {
+         if (m_head == m_tail) return false;
+
+         val = queue[m_tail];
+         m_tail = next_index(m_tail);
+         return true;
+     }
+
+     // UTILIDADES
+     void clear() { m_head = 0; m_tail = 0; m_newLineDetected = false; }
+     void enableNewLine(newLineType_t mode = LF) {
+         m_newLineDetectEnable = true;
+         m_newLineDetected = false;
+         m_newLineType = mode;
+     }
+     void disableNewLine() { m_newLineDetectEnable = false; }
+     bool isNewLine() const { return m_newLineDetected; }
+     void newLineClear() { m_newLineDetected = false; }
+ };
 
 #endif /* COLACIRCULAR_H_ */

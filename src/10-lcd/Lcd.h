@@ -34,7 +34,7 @@ class Lcd:public Callback
 		uint32_t m_lcdInxIn;
 		uint32_t m_lcdInxOut;
 		uint32_t m_lcdDataCount;
-		uint16_t m_lcdDelay;
+		volatile uint16_t m_lcdDelay;
 		const vector <gpio*> m_bus;
 
 	public:

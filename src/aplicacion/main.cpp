@@ -1,17 +1,19 @@
 #include "inicializarInfotronic.h"
 #include "13-NFC/nfc.h"
+#include "systick.h"
 
-nfc *my_nfc;
-timer globalTimer(timer::DEC);
+// Convierte un byte (ej: 0xFA) a texto "[FA]"
+// No usa librerías estándar, costo de memoria casi nulo.
+void byteToHexAndFormat(uint8_t byte, char* buffer) {
+    const char hexChars[] = "0123456789ABCDEF";
 
-// Helper para visualizar el UID (copiado por seguridad si no estaba en tus libs)
-void arrayToHexStr(uint8_t *data, uint8_t len, char *str) {
-    const char hex[] = "0123456789ABCDEF";
-    for (int i = 0; i < len; i++) {
-        str[i * 2] = hex[(data[i] >> 4) & 0x0F];
-        str[i * 2 + 1] = hex[data[i] & 0x0F];
-    }
-    str[len * 2] = '\0';
+    buffer[0] = '[';
+    // Nibble alto (0xFA -> F)
+    buffer[1] = hexChars[(byte >> 4) & 0x0F];
+    // Nibble bajo (0xFA -> A)
+    buffer[2] = hexChars[byte & 0x0F];
+    buffer[3] = ']';
+    buffer[4] = '\0'; // Terminador nulo
 }
 
 // Muestra mensaje de error en LCD (sin sprintf para ahorrar memoria)
@@ -47,86 +49,84 @@ void buildErrorMsg(uint8_t err, char* buffer) {
     buffer[i] = '\0';
 }
 
+Led L2( 0 , Callback_Leds_gpio , 200 ) ;
+Led L3( 1 , Callback_Leds_gpio , 100 ) ;
+Led L4( 2 , Callback_Leds_gpio , 300 ) ;
+
+#define MAX_BUFFER 64
+uint8_t rxBuffer[MAX_BUFFER];
+uint8_t rxIndex = 0;
+
+// Estado simple para detectar tramas
+enum Estado_t { ESPERANDO_00_1, ESPERANDO_00_2, RECIBIENDO_DATOS };
+Estado_t estado = ESPERANDO_00_1;
+
 int main(void) {
     // 1. Inicialización del Hardware
     InicializarInfotronic();
 
-    // UART4: Tx P0.16, Rx P0.17
-    // Instancia del driver NFC
-    my_nfc = new nfc(4, 0, 16, 0, 17);
+    // Apagamos todo
+    L2.Off(); L3.Off(); L4.Blink();
 
-    lcd->Set("NFC PN532 FSM   ", 0, 0);
-    lcd->Set("Iniciando...    ", 1, 0);
+	// 2. Instanciar el objeto UART
+	// uart(num, portTx, pinTx, portRx, pinRx, baudrate)
+	// UART 4 | TX: Puerto 0, Pin 16 | RX: Puerto 0, Pin 17 | 115200 Baudios
+	uart miUart(4, 0, 16, 0, 17, 115200);
 
-    // 1. Despertar al módulo
-	bool state = my_nfc->wakeUp();
+	// Limpieza inicial por si quedó basura en el buffer
+	miUart.clearRxBuffer();
 
-	// Espera inicial (500ms) usando el timer global
-	globalTimer.TimerStart(5);
-	while(!globalTimer) { // Esperamos mientras NO venza
-		my_nfc->Tick();
-	}
+	uint8_t dato;
+	uint8_t longitudTrama = 0;
 
-	if(state){
-		lcd->Set("NFC Listo!      ", 1, 0);
-		L1.On();
-	} else {
-		lcd->Set("NFC Error WakeUP!", 1, 0);
-		L1.Blink();
-	}
+	while(1){
+		if(miUart.Receive(dato)) {
+			miUart.Transmit(dato);
+			switch(estado) {
+				case ESPERANDO_00_1:
+					if (dato == 0x00) estado = ESPERANDO_00_2;
+					break;
 
-    bool lecturaEnCurso = false;
-	char lcdBuffer[17];
-	uint8_t uidLength;
-
-	// Timer configurado para vencer inmediatamente la primera vez
-	globalTimer.TimerStart(0);
-
-	while(1) {
-		// --- MANTENER VIVO EL DRIVER ---
-		my_nfc->Tick();
-
-		if (!lecturaEnCurso) {
-			// --- FASE 1: INICIAR LECTURA ---
-			if (globalTimer) {
-				my_nfc->startReadPassiveTargetID();
-				lecturaEnCurso = true;
-			}
-		}
-		else {
-			// --- FASE 2: ESPERAR RESULTADO ---
-			if (!my_nfc->isBusy()) {
-				lecturaEnCurso = false; // Terminó la transacción
-
-				if (my_nfc->isCardPresent()) {
-					// --- TARJETA DETECTADA ---
-					L2.On();
-
-					const uint8_t* uid = my_nfc->getUid();
-					uidLength = my_nfc->getUidLength();
-
-					lcd->Set("UID Detectado:  ", 0, 0);
-					arrayToHexStr((uint8_t*)uid, uidLength, lcdBuffer);
-					lcd->Set("                ", 1, 0);
-					lcd->Set(lcdBuffer, 1, 0);
-
-					// Pausa visual de 1 segundo
-					globalTimer.TimerStart(10);
-					while(!globalTimer) { // Espera bloqueante pero con Tick()
-						 my_nfc->Tick();
+				// --- AQUÍ ESTÁ LA MAGIA ---
+				case ESPERANDO_00_2:
+					if (dato == 0x00) {
+						// Si llega otro 00 (sea fantasma o real), NOS QUEDAMOS AQUÍ.
+						// Esto se "come" todos los ceros extra hasta que llegue el FF.
+						estado = ESPERANDO_00_2;
 					}
-					L2.Off();
+					else if (dato == 0xFF) {
+						 // ¡Llegó el FF! Ahora sí empezamos a guardar datos
+						 estado = RECIBIENDO_DATOS;
+						 rxIndex = 0;
+					}
+					else {
+						// Si es cualquier otra cosa (ruido), reiniciamos
+						estado = ESPERANDO_00_1;
+					}
+					break;
 
-					// Esperar 500ms antes de permitir nueva lectura
-					globalTimer.TimerStart(5);
-				}
-				else {
-					// --- SIN TARJETA ---
-					// Reintentar en 200ms
-					globalTimer.TimerStart(2);
-				}
+				// Nota: Borramos "case ESPERANDO_FF" porque ya lo manejamos arriba
+
+				case RECIBIENDO_DATOS:
+					rxBuffer[rxIndex++] = dato;
+
+					if (rxIndex == 1) longitudTrama = dato;
+
+					// Verificamos longitud (cast a uint16_t para seguridad)
+					if (rxIndex >= ((uint16_t)longitudTrama + 4)) {
+						 L2.On(); // EXITO!
+						 L3.Off();
+						 L4.Off();
+						 estado = ESPERANDO_00_1;
+						 //miUart.Transmit("OK\n");
+					}
+					if (rxIndex >= MAX_BUFFER) estado = ESPERANDO_00_1;
+					break;
 			}
 		}
+
+		// Si L3 prende ahora, es brujería (o el cable).
+		if (miUart.getRxOverruns() > 0) L3.On();
 	}
 
 	return 0;

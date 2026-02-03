@@ -117,9 +117,7 @@ Lcd *lcd;
 
 vector <gpio *> VectorDeLeds;
 
-Led L1( 0 , Callback_Leds_gpio , 200 ) ;
-Led L2( 1 , Callback_Leds_gpio , 100 ) ;
-Led L3( 2 , Callback_Leds_gpio ) ;
+
 
 uart *uartX ;
 /***********************************************************************************************************************************
@@ -149,7 +147,7 @@ void InicializarInfotronic ( void )
 	VectorDeLeds.push_back( &g_out0 ) ;
 	VectorDeLeds.push_back( &g_out1 ) ;
 	VectorDeLeds.push_back( &g_out2 ) ;
-
+/*
 	// ## TECLADO ####################################################################################
 	scn.push_back( scn0 );
 	scn.push_back( scn1 );
@@ -183,7 +181,7 @@ void InicializarInfotronic ( void )
 	//                      		  digitos
 	//                               agrupados segmentos   barrido    correccion       codificacion
 	Display = new display7Segmentos ( grupos ,  i4511 ,      i4017 , PosicionRelativa , digito::BCD );
-
+*/
 	// ## DISPLAY LCD ###############################################################################
 	BusLcd.push_back( d4 );
 	BusLcd.push_back( d5 );

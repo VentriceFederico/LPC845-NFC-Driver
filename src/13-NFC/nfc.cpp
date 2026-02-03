@@ -1,233 +1,170 @@
 #include <13-NFC/nfc.h>
 #include <string.h>
 
-// Macros para depuracion rapida de tiempos
-#define WAIT_TIMEOUT(x) for(volatile uint32_t i=0; i<(x*5000); i++)
-
-// --- VARIABLES DE DEBUG GLOBAL ---
-DebugTrace_t g_nfcTrace[64];
-uint8_t g_traceHead = 0;
-volatile uint8_t g_rawBuffer[64];
-volatile uint32_t g_rawIdx = 0;
-
-// Constructor: Inicializa la UART y los estados
+// Constructor
 nfc::nfc(uint8_t uartNum, uint8_t portTx, uint8_t pinTx, uint8_t portRx, uint8_t pinRx)
     : uart(uartNum, portTx, pinTx, portRx, pinRx, 115200, uart::ocho_bits, uart::NoParidad)
 {
     m_nfcState = NfcState_t::IDLE;
     m_parserState = ParserState_t::PREAMBLE;
+
     m_rxIndex = 0;
     m_msgLen = 0;
     m_checksum = 0;
-
     m_cardPresent = false;
     m_uidLen = 0;
     m_lastCommandSent = 0;
-    m_lastRxOverruns = 0;
-    m_wakeupConfirmed = false;
-    memset(m_uid, 0, sizeof(m_uid));
 
-    // Inicialización de variables de reintento
-	m_retryTimer = 0;
-	m_lastCmdLen = 0;
-	m_isWakeupCmd = false;
-	memset(m_lastCmdBuffer, 0, sizeof(m_lastCmdBuffer));
+    // Limpieza inicial de buffers
+    memset(m_rxBuffer, 0, sizeof(m_rxBuffer));
+    memset(m_uid, 0, sizeof(m_uid));
 }
 
 nfc::~nfc() { }
 
 /**
- * @brief Máquina de Estados Principal.
- * Procesa todos los bytes pendientes en la cola de recepción de la UART.
+ * @brief Motor principal. Procesa los bytes que llegan a la UART.
  */
 void nfc::Tick() {
-
-	const uint32_t currentOverruns = getRxOverruns();
-	if (currentOverruns != m_lastRxOverruns) {
-		m_lastRxOverruns = currentOverruns;
-		// El reinicio forzado aquí puede estar rompiendo la trama válida
-		//m_parserState = ParserState_t::PREAMBLE;
-		//m_rxIndex = 0;
-		//m_checksum = 0;
-	}
-
-
     uint8_t byte;
-	while (this->Receive(byte)) {
-		processByte(byte);
-
-		// Si recibimos ALGO, reseteamos el timer de reintento para dar más tiempo
-		if (m_nfcState != NfcState_t::IDLE) {
-			 m_retryTimer = 0;
-		}
-	}
-
-	//Lógica de Reintento Automático (Timeout)
-    if (m_nfcState != NfcState_t::IDLE) {
-        m_retryTimer++;
-        if (m_retryTimer > RETRY_THRESHOLD) {
-            // ¡Timeout! No llegó respuesta. Reenviamos.
-            retransmitLastCommand();
-            m_retryTimer = 0; // Reiniciar cuenta
-        }
+    // Mientras haya datos en la cola de recepción UART, procésalos
+    while (this->Receive(byte)) {
+        processByte(byte);
     }
 }
 
 /**
  * @brief Parser byte a byte. Reconstruye la estructura de la trama NXP.
  */
+/**
+ * @brief Máquina de Estados del Parser (Nivel Bajo).
+ * Analiza byte a byte para encontrar tramas válidas o ACKs.
+ */
 void nfc::processByte(uint8_t byte) {
-
-	// --- SNIFFER EN RAM (Inicio) ---
-	// Guardamos qué está pasando antes de procesar
-	g_nfcTrace[g_traceHead].receivedByte = byte;
-	g_nfcTrace[g_traceHead].parserState  = (uint8_t)m_parserState;
-	g_nfcTrace[g_traceHead].nfcState     = (uint8_t)m_nfcState;
-
-	// Avanzamos índice circularmente
-	g_traceHead = (g_traceHead + 1) % 64;
-	// --- SNIFFER EN RAM (Fin) ---
-
-    switch ( m_parserState ) {
+    switch (m_parserState) {
         case ParserState_t::PREAMBLE:
-            if (byte == PN532_PREAMBLE) {
-            	m_parserState = ParserState_t::START_CODE1;
-            }
+            if (byte == PN532_PREAMBLE)
+                m_parserState = ParserState_t::START_CODE1;
             break;
 
         case ParserState_t::START_CODE1:
-            if (byte == PN532_PREAMBLE) {
-                // Sigue siendo preámbulo, nos quedamos aquí.
-            } else if (byte == PN532_STARTCODE2) { // 0xFF
-            	m_parserState = ParserState_t::LENGTH;
-            } else {
-            	m_parserState = ParserState_t::PREAMBLE; // Ruido, reiniciar.
-            }
+            if (byte == PN532_STARTCODE1)
+                m_parserState = ParserState_t::START_CODE2;
+            else if (byte != PN532_PREAMBLE) // Si no es 00, reiniciamos
+                m_parserState = ParserState_t::PREAMBLE;
+            break;
+
+        case ParserState_t::START_CODE2:
+            if (byte == PN532_STARTCODE2)
+                m_parserState = ParserState_t::LENGTH;
+            else
+                m_parserState = ParserState_t::PREAMBLE;
             break;
 
         case ParserState_t::LENGTH:
-            // Aquí distinguimos ACK de Trama de Datos.
-            // ACK estándar: ... 00 FF 00 FF 00 ...
-            // LEN=00, LCS=FF.
-            if (byte == 0x00) {
-                // Posible ACK (LEN=0). Lo confirmaremos en el siguiente byte (LCS).
-                m_msgLen = 0;
-            } else {
-                m_msgLen = byte;
-            }
+            m_msgLen = byte;
             m_parserState = ParserState_t::LENGTH_CS;
             break;
 
-        case ParserState_t::LENGTH_CS: // LCS
-			// 1. CORRECCIÓN CRÍTICA: Detectar ACK explícitamente primero.
-			// El ACK (LEN=0, LCS=FF) no cumple la suma (0+FF != 0), por lo que fallaba antes.
-			if (m_msgLen == 0 && byte == 0xFF) {
-				onAckReceived();
-				m_parserState = ParserState_t::POSTAMBLE; // El ACK termina en 00
-				break; // Salimos del switch
-			}
+        case ParserState_t::LENGTH_CS:
+            // CASO ESPECIAL: El ACK (00 FF) matemáticamente falla el checksum normal.
+            // Hay que detectarlo explícitamente aquí.
+            if (m_msgLen == 0 && byte == 0xFF) {
+                onAckReceived();
+                m_parserState = ParserState_t::POSTAMBLE;
+                break;
+            }
 
-			// 2. Validación estándar para tramas de datos (LEN + LCS = 0)
-			if ((uint8_t)(m_msgLen + byte) == 0x00) {
-				// Es una trama de datos válida
-				m_parserState = ParserState_t::TFI;
-			} else {
-				// Error de checksum real (ruido o trama rota)
-				m_parserState = ParserState_t::PREAMBLE;
-			}
-			break;
+            // Validación normal: LEN + LCS debe ser 0x00
+            if ((uint8_t)(m_msgLen + byte) == 0x00) {
+                m_parserState = ParserState_t::TFI;
+            } else {
+                m_parserState = ParserState_t::PREAMBLE; // Error de trama
+            }
+            break;
 
         case ParserState_t::TFI:
-            if (byte == PN532_PN532TOHOST) { // 0xD5
+            if (byte == PN532_PN532TOHOST) {
                 m_rxIndex = 0;
-                m_checksum = byte; // TFI es el primer byte del cálculo de checksum
+                m_checksum = PN532_PN532TOHOST; // Iniciamos checksum con el TFI
                 m_parserState = ParserState_t::DATA;
             } else {
-            	m_parserState = ParserState_t::PREAMBLE;
+                m_parserState = ParserState_t::PREAMBLE;
             }
             break;
 
         case ParserState_t::DATA:
             m_rxBuffer[m_rxIndex++] = byte;
-            m_checksum += byte;
+            m_checksum += byte; // Acumulamos para validar al final
 
-            // m_msgLen incluía el TFI, así que restamos 1 para saber cuántos bytes de payload quedan
+            // Nota: m_msgLen incluía el TFI, por eso restamos 1
             if (m_rxIndex >= (m_msgLen - 1)) {
-            	m_parserState = ParserState_t::DATA_CS;
+                m_parserState = ParserState_t::DATA_CS;
             }
             break;
 
-        case ParserState_t::DATA_CS: // DCS
-            if ((uint8_t)(m_checksum + byte) == 0x00) {
-                // Checksum de datos válido
-            	m_parserState = ParserState_t::POSTAMBLE;
-            } else {
-            	m_parserState = ParserState_t::PREAMBLE; // Checksum fail
+        case ParserState_t::DATA_CS:
+            m_checksum += byte; // La suma total (Datos + DCS) debe dar 0x00
+            if (m_checksum == 0x00) {
+                onFrameReceived(); // ¡Trama Válida!
             }
+            m_parserState = ParserState_t::POSTAMBLE;
             break;
 
         case ParserState_t::POSTAMBLE:
-            if (byte == PN532_POSTAMBLE) {
-                // Trama completada exitosamente
-                if (m_msgLen > 0) { // Si no era un ACK
-                    onFrameReceived();
-                }
-            }
-            m_parserState = ParserState_t::PREAMBLE; // Listos para la siguiente
+            // Siempre volvemos a buscar la siguiente trama
+            m_parserState = ParserState_t::PREAMBLE;
             break;
     }
 }
 
 /**
- * @brief Maneja la recepción de un ACK válido.
+ * @brief Se llama cuando recibimos un ACK (00 00 FF 00 FF 00)
  */
 void nfc::onAckReceived() {
+    // Si estábamos esperando confirmación, avanzamos el estado lógico
     if (m_nfcState == NfcState_t::WAITING_ACK) {
-        // CAMBIO AQUI: Agregamos SAMCONFIGURATION a la lista
-        if (m_lastCommandSent == PN532_COMMAND_INLISTPASSIVE ||
-            m_lastCommandSent == PN532_COMMAND_SAMCONFIGURATION) { // <--- 0x14
-             m_nfcState = NfcState_t::WAITING_RESPONSE;
-        } else {
-             m_nfcState = NfcState_t::IDLE;
-        }
+        m_nfcState = NfcState_t::WAITING_RESPONSE;
     }
 }
 
 /**
- * @brief Maneja la recepción de una trama de datos válida.
+ * @brief Se llama cuando recibimos una trama de datos completa y verificada.
  */
 void nfc::onFrameReceived() {
-    // 1. Respuesta a InListPassiveTarget
+    // Verificamos que la respuesta corresponda al último comando enviado
+
+    // 1. Respuesta a Lectura de Tarjeta (InListPassiveTarget)
     if (m_nfcState == NfcState_t::WAITING_RESPONSE &&
         m_rxBuffer[0] == (PN532_COMMAND_INLISTPASSIVE + 1))
     {
-        // ... (Tu código de lectura de UID sigue igual) ...
-        // ...
+        uint8_t tagsFound = m_rxBuffer[1];
+        if (tagsFound > 0) {
+            m_uidLen = m_rxBuffer[6]; // Longitud del UID
+            // Copiamos el UID (comienza en el byte 7)
+            for (uint8_t i = 0; i < m_uidLen && i < 7; i++) {
+                m_uid[i] = m_rxBuffer[7 + i];
+            }
+            m_cardPresent = true;
+        }
         m_nfcState = NfcState_t::IDLE;
     }
     // 2. Respuesta a WakeUp (SAMConfiguration)
-    // CAMBIO AQUI: Verificamos contra SAMCONFIGURATION (0x14 + 1 = 0x15)
     else if (m_nfcState == NfcState_t::WAITING_RESPONSE &&
              m_rxBuffer[0] == (PN532_COMMAND_SAMCONFIGURATION + 1))
     {
-        // WakeUp exitoso confirmado
-        m_wakeupConfirmed = true;
+        // El módulo despertó correctamente
         m_nfcState = NfcState_t::IDLE;
     }
 }
 
-/**
- * @brief Envía comando WakeUp (0x55 0x55 ...).
- */
-void nfc::sendWakeUp() {
-    // Marcamos que el último comando fue WakeUp (secuencia especial)
-    m_isWakeupCmd = true;
-    m_retryTimer = 0;
+// --- Comandos Públicos ---
 
-    // Secuencia WakeUp Raw
+void nfc::sendWakeUp() {
+    // Trama especial larga para despertar al módulo (contiene SAMConfiguration 0x14)
     const uint8_t wake[] = {
-            0x55, 0x55, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0xFF, 0x05, 0xFB, 0xD4, 0x14, 0x01, 0x14, 0x01, 0x02, 0x00
+        0x55, 0x55, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0xFF, 0x05, 0xFB, 0xD4, 0x14, 0x01, 0x14, 0x01, 0x02, 0x00
     };
 
     this->Transmit((uint8_t*)wake, (uint8_t)sizeof(wake));
@@ -236,59 +173,11 @@ void nfc::sendWakeUp() {
     m_nfcState = NfcState_t::WAITING_ACK;
 }
 
-/**
- * @brief Envía WakeUp y espera la respuesta completa (ACK + trama SAMConfig).
- * Reintenta una vez si no se recibe la trama completa.
- */
-bool nfc::wakeUp() {
-    // 1. Enviamos la primera vez
-    m_wakeupConfirmed = false;
-    sendWakeUp();
-
-    // 2. Esperamos la confirmación.
-    // Gracias al cambio en Tick(), si no llega respuesta,
-    // Tick() se encargará de reenviar el comando automáticamente.
-    // Nosotros solo esperamos a que el flag se ponga en true.
-
-    uint32_t safetyGuard = 0;
-    // Un límite muy alto (ej. 2-3 segundos reales) por seguridad
-    const uint32_t MAX_WAIT = 5000000;
-
-    while (!m_wakeupConfirmed && safetyGuard < MAX_WAIT) {
-        Tick();
-        safetyGuard++;
-    }
-
-    return m_wakeupConfirmed;
-}
-
-void nfc::retransmitLastCommand() {
-    if (m_isWakeupCmd) {
-        // Si era WakeUp, reenviamos la secuencia especial
-        const uint8_t wake[] = {
-             0x55, 0x55, 0x00, 0x00, 0x00, 0x00, 0x00,
-             0x00, 0xFF, 0x05, 0xFB, 0xD4, 0x14, 0x01, 0x14, 0x01, 0x02, 0x00
-        };
-        this->Transmit((uint8_t*)wake, (uint8_t)sizeof(wake));
-    } else {
-        // Si era comando normal, usamos sendCommand (que volverá a armar la trama)
-        // Nota: sendCommand reseteará el timer y volverá a guardar el buffer.
-        // Es un poco redundante copiar el buffer sobre sí mismo, pero es seguro.
-        sendCommand(m_lastCmdBuffer, m_lastCmdLen);
-    }
-
-    // Restauramos el estado esperado (por si acaso cambió erróneamente)
-    m_nfcState = NfcState_t::WAITING_ACK;
-}
-
-/**
- * @brief Inicia la búsqueda de tarjeta. NO BLOQUEA.
- * Debes llamar a isCardPresent() en el bucle principal para ver el resultado.
- */
 void nfc::startReadPassiveTargetID() {
-    uint8_t payload[] = { PN532_COMMAND_INLISTPASSIVE, 0x01, 0x00 }; // Max 1 tarjeta, 106kbps
+    // Comando InListPassiveTarget (0x4A), Max 1 tarjeta (0x01), 106kbps (0x00)
+    uint8_t payload[] = { PN532_COMMAND_INLISTPASSIVE, 0x01, 0x00 };
 
-    m_cardPresent = false; // Reseteamos estado anterior
+    m_cardPresent = false;
     m_lastCommandSent = PN532_COMMAND_INLISTPASSIVE;
 
     sendCommand(payload, sizeof(payload));
@@ -299,37 +188,45 @@ void nfc::startReadPassiveTargetID() {
  * @brief Empaqueta y envía un comando según protocolo NXP.
  */
 void nfc::sendCommand(const uint8_t* cmd, uint8_t len) {
-    // 1. Guardar copia para reintentos
-    if (len <= sizeof(m_lastCmdBuffer)) {
-        memcpy(m_lastCmdBuffer, cmd, len);
-        m_lastCmdLen = len;
-    }
-    m_isWakeupCmd = false;
-    m_retryTimer = 0; // Reset timer
-
-    // 2. Construcción y Envío de la Trama (Código original)
     uint8_t frame[64];
     uint8_t idx = 0;
     uint8_t checksum = 0;
 
     frame[idx++] = PN532_PREAMBLE;
     frame[idx++] = PN532_PREAMBLE;
-    frame[idx++] = PN532_STARTCODE2;
+    frame[idx++] = PN532_STARTCODE2; // 0xFF Start Code 2
 
-    uint8_t totalLen = len + 1;
-    frame[idx++] = totalLen;
-    frame[idx++] = (uint8_t)(~totalLen + 1);
+    frame[idx++] = len + 1;         // LEN (Datos + TFI)
+    frame[idx++] = ~(len + 1) + 1;  // LCS (Complemento a 2)
 
-    frame[idx++] = PN532_HOSTTOPN532;
+    frame[idx++] = PN532_HOSTTOPN532; // TFI
     checksum += PN532_HOSTTOPN532;
 
-    for(int i=0; i<len; i++) {
+    for (uint8_t i = 0; i < len; i++) {
         frame[idx++] = cmd[i];
         checksum += cmd[i];
     }
 
-    frame[idx++] = (uint8_t)(~checksum + 1);
+    frame[idx++] = ~checksum + 1;   // DCS
     frame[idx++] = PN532_POSTAMBLE;
 
     this->Transmit(frame, idx);
+}
+
+// --- Getters ---
+
+bool nfc::isBusy() {
+    return (m_nfcState != NfcState_t::IDLE);
+}
+
+bool nfc::isCardPresent() {
+    return m_cardPresent;
+}
+
+const uint8_t* nfc::getUid() {
+    return m_uid;
+}
+
+uint8_t nfc::getUidLength() {
+    return m_uidLen;
 }
