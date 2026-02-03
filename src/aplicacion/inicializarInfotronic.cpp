@@ -122,15 +122,6 @@ Led L2( 1 , Callback_Leds_gpio , 100 ) ;
 Led L3( 2 , Callback_Leds_gpio ) ;
 
 uart *uartX ;
-
-// ADC
-//adc canal1( 1 , adc::Promedio );
-//adc canal1( 1 , TablaNTC );
-//adc canal1( 1  );
-
-// Termistor a GND
-static const int32_t Tabla_NTC[] = { 971,956,938,917,891,862,828,790,749,704,657,609,560,512,464,419,381,337,300,267,237,210,186,165,146,130,115,102,91,81,72,64,58,0};
-
 /***********************************************************************************************************************************
  *** VARIABLES GLOBALES PUBLICAS
  **********************************************************************************************************************************/
@@ -149,30 +140,6 @@ void Callback_Leds_gpio ( uint8_t NumeroDeLed , Led::led_t Estado )
 		else
 			VectorDeLeds[ NumeroDeLed ]->ClrPin();
 	}
-}
-
-
-int32_t TablaNTC( int32_t dato)
-{
-	uint8_t j;
-	dato /= 4;// lo paso a 10 bits
-
-	for(j = 0 ; j < 33; j++)
-	{
-		if( dato > Tabla_NTC[j] )
-			break;
-	}
-
-	dato = (int) ( ( ( (unsigned long)( Tabla_NTC[j-1] - dato ) * 50000l ) / (Tabla_NTC[j-1] - Tabla_NTC[j]) ) / 10000 );
-	dato = dato + 5 * (j - 1) - 40;
-
-	return dato;
-}
-
-int32_t TablaPote( int32_t dato )
-{
-	dato = (( dato * 33000 ) / 4096)/1000;
-	return dato;
 }
 void InicializarInfotronic ( void )
 {
@@ -224,22 +191,6 @@ void InicializarInfotronic ( void )
 	BusLcd.push_back( d7 );
 	BusLcd.push_back( rs );
 	BusLcd.push_back( en );
-
-	// salida a RS232 - terminal MCUXpresso
-
-/*
-	 uartX = new uart(
-						4 ,					// uart seleccionada UART4
-						0 , 				// PortTx
-						16, 				// Pin Tx
-						0 ,					// PortRx
-						17, 				// Pin Rx
-						115200 ,			// baudios
-						uart::ocho_bits ,	// bits de datos
-						uart::NoParidad	// tipo de paridad
-						);
-*/
-
 
 	// ###############################################################################################
 	SysTick_CallBack_Install( systick_callback );
