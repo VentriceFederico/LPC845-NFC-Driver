@@ -72,62 +72,49 @@ int main(void) {
 	// uart(num, portTx, pinTx, portRx, pinRx, baudrate)
 	// UART 4 | TX: Puerto 0, Pin 16 | RX: Puerto 0, Pin 17 | 115200 Baudios
 	uart miUart(4, 0, 16, 0, 17, 115200);
+	Nfc miNfc (&miUart);
 
-	// Limpieza inicial por si quedó basura en el buffer
+	// Espera de estabilización
+	for(volatile int i=0; i<500000; i++);
 	miUart.clearRxBuffer();
 
-	uint8_t dato;
-	uint8_t longitudTrama = 0;
+	// 1. Configurar Modulo
+	if (miNfc.SAMConfig()) { // O sendCommand() si no lo renombraste
+		L2.On(); // Configurado OK
+	} else {
+		L3.On(); // Fallo Config
+		while(1); // Detener
+	}
+
+	uint8_t uid[7];
+	uint8_t uidLen;
+	char hexStr[5]; // Buffer para texto "[XX]"
 
 	while(1){
-		if(miUart.Receive(dato)) {
-			miUart.Transmit(dato);
-			switch(estado) {
-				case ESPERANDO_00_1:
-					if (dato == 0x00) estado = ESPERANDO_00_2;
-					break;
+	        // 2. Buscar tarjeta (Baudrate 0x00 = ISO14443A / Mifare)
+	        // Esta funcion enviara el comando y esperara respuesta
+	        if (miNfc.readPassiveTargetID(0x00, uid, &uidLen)) {
 
-				// --- AQUÍ ESTÁ LA MAGIA ---
-				case ESPERANDO_00_2:
-					if (dato == 0x00) {
-						// Si llega otro 00 (sea fantasma o real), NOS QUEDAMOS AQUÍ.
-						// Esto se "come" todos los ceros extra hasta que llegue el FF.
-						estado = ESPERANDO_00_2;
-					}
-					else if (dato == 0xFF) {
-						 // ¡Llegó el FF! Ahora sí empezamos a guardar datos
-						 estado = RECIBIENDO_DATOS;
-						 rxIndex = 0;
-					}
-					else {
-						// Si es cualquier otra cosa (ruido), reiniciamos
-						estado = ESPERANDO_00_1;
-					}
-					break;
+	            // ¡TARJETA ENCONTRADA! -> Prender L4 fugazmente
+	            L4.On();
 
-				// Nota: Borramos "case ESPERANDO_FF" porque ya lo manejamos arriba
+	            miUart.Transmit("\r\nUID: ");
 
-				case RECIBIENDO_DATOS:
-					rxBuffer[rxIndex++] = dato;
+	            // Imprimir el UID byte por byte
+	            for (uint8_t i = 0; i < uidLen; i++) {
+	                byteToHexAndFormat(uid[i], hexStr);
+	                miUart.Transmit(hexStr);
+	                miUart.Transmit(" ");
+	            }
 
-					if (rxIndex == 1) longitudTrama = dato;
-
-					// Verificamos longitud (cast a uint16_t para seguridad)
-					if (rxIndex >= ((uint16_t)longitudTrama + 4)) {
-						 L2.On(); // EXITO!
-						 L3.Off();
-						 L4.Off();
-						 estado = ESPERANDO_00_1;
-						 //miUart.Transmit("OK\n");
-					}
-					if (rxIndex >= MAX_BUFFER) estado = ESPERANDO_00_1;
-					break;
-			}
-		}
-
-		// Si L3 prende ahora, es brujería (o el cable).
-		if (miUart.getRxOverruns() > 0) L3.On();
-	}
+	            // Esperar un poco para no spamear la UART (y dar tiempo a quitar la tarjeta)
+	            for(volatile int i=0; i<2000000; i++);
+	            L4.Off();
+	        }
+	        else {
+	            // No hay tarjeta, seguimos buscando...
+	        }
+	    }
 
 	return 0;
 }
