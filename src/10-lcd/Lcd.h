@@ -41,6 +41,7 @@ class Lcd:public Callback
 		Lcd(const vector <gpio*> &bus);
 		void Set( const char *string , uint8_t line , uint8_t pos );
 		void callback(void);
+		void Clear();
 	private:
 		int16_t Pop( void );
 		int8_t Push( uint8_t data , uint8_t control );

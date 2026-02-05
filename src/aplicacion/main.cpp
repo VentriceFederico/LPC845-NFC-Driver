@@ -1,6 +1,43 @@
 #include "inicializarInfotronic.h"
 #include "13-NFC/nfc.h"
 #include "systick.h"
+#include "14-GestorAcceso/GestorAcceso.h"
+
+// --- DEFINICIONES Y CONSTANTES ---
+#define TIEMPO_LECTURA_NFC     500000  // Pequeña pausa entre lecturas
+#define TIEMPO_VISUALIZACION   4000000 // Tiempo para leer mensajes largos (Acceso OK/NO)
+#define TIEMPO_ESPERA_ADMIN    3000000 // Tiempo esperando que el admin quite su tarjeta
+#define TIMEOUT_NUEVA_TARJETA  50      // Intentos para leer nueva tarjeta
+
+// Estados del Sistema
+enum EstadoSistema {
+    ESTADO_ESPERANDO,       // "Acerque Tarjeta"
+    ESTADO_VALIDANDO,       // Tarjeta detectada, decidiendo qué hacer
+    ESTADO_MODO_ADMIN,      // Menú de administrador
+    ESTADO_GESTION_USER   	// Agregar/Borrar user
+};
+
+// Delay bloqueante aproximado (para sustituir los for loops crudos)
+void delay_aprox(volatile uint32_t ciclos) {
+    while(ciclos > 0) ciclos--;
+}
+
+// Función segura para actualizar LCD asegurando que el mensaje salga
+void actualizarPantalla(const char* l1, const char* l2) {
+	// 1. Limpiamos la pantalla (Hardware) y el buffer (Software)
+	// Esto asegura que el LCD quede vacio y sin basura vieja.
+	//lcd->Clear();
+
+	// 2. Escribimos las lineas nuevas
+	if (l1) lcd->Set(l1, 0, 0);
+	if (l2) lcd->Set(l2, 1, 0);
+
+	// 3. Encendemos el motor del LCD (SysTick) para que procese los comandos
+	SysTick->CTRL |= (1 << 0);
+
+	// Damos tiempo al LCD para procesar el comando Clear (aprox 2ms) + los caracteres
+	delay_aprox(50000);
+}
 
 // Convierte un byte (ej: 0xFA) a texto "[FA]"
 // No usa librerías estándar, costo de memoria casi nulo.
@@ -16,113 +53,187 @@ void byteToHexAndFormat(uint8_t byte, char* buffer) {
     buffer[4] = '\0'; // Terminador nulo
 }
 
-// Convierte array de bytes a String Hex: {0xDE, 0xAD} -> "DEAD"
+// Convierte array de bytes a String Hex: {0xDE, 0xAD} -> "DE:AD"
 void formatUidForLcd(uint8_t *uid, uint8_t len, char *buffer) {
     const char hex[] = "0123456789ABCDEF";
-    for(int i=0; i<len; i++) {
-        // Nibble alto
-        buffer[i*2] = hex[(uid[i] >> 4) & 0x0F];
-        // Nibble bajo
-        buffer[i*2+1] = hex[uid[i] & 0x0F];
+    int idx = 0; // Índice manual para el buffer de salida
+
+    for(int i = 0; i < len; i++) {
+        // Nibble alto (ej: A)
+        buffer[idx++] = hex[(uid[i] >> 4) & 0x0F];
+
+        // Nibble bajo (ej: 9)
+        buffer[idx++] = hex[uid[i] & 0x0F];
+
+        // Agregamos ":" solo si NO es el último byte
+        if (i < (len - 1)) {
+            buffer[idx++] = ':';
+        }
     }
-    buffer[len*2] = '\0'; // Terminador nulo
+    buffer[idx] = '\0'; // Terminador nulo al final
 }
 
 Led L2( 0 , Callback_Leds_gpio , 200 ) ;
 Led L3( 1 , Callback_Leds_gpio , 100 ) ;
 Led L4( 2 , Callback_Leds_gpio , 300 ) ;
 
-#define MAX_BUFFER 64
-uint8_t rxBuffer[MAX_BUFFER];
-uint8_t rxIndex = 0;
-// Clave por defecto de fábrica (FF FF FF FF FF FF)
-uint8_t KEY_DEFAULT[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-
-// Estado simple para detectar tramas
-enum Estado_t { ESPERANDO_00_1, ESPERANDO_00_2, RECIBIENDO_DATOS };
-Estado_t estado = ESPERANDO_00_1;
-
 int main(void) {
-    // 1. Inicialización del Hardware
-    InicializarInfotronic();
+	// 1. Inicialización
+	InicializarInfotronic();
+	L2.Off(); L3.Off(); L4.Off();
 
-    // Apagamos todo
-    L2.Off(); L3.Off(); L4.Off();
+    actualizarPantalla("Sistema NFC", "Iniciando...");
 
-    // Mensaje de bienvenida
-	lcd->Set("Sistema NFC", 0, 0);
-	lcd->Set("Iniciando...", 1, 0);
-
-	// 2. Instanciar el objeto UART
-	// uart(num, portTx, pinTx, portRx, pinRx, baudrate)
-	// UART 4 | TX: Puerto 0, Pin 16 | RX: Puerto 0, Pin 17 | 115200 Baudios
+    // 2. Drivers
 	uart miUart(4, 0, 16, 0, 17, 115200);
-	Nfc miNfc (&miUart);
+	Nfc miNfc(&miUart);
+	GestorAcceso controlAcceso;
 
-	// Espera de estabilización
-	for(volatile int i=0; i<500000; i++);
+
+	// 3. Configuración PN532 (Modo Silencio)
 	miUart.clearRxBuffer();
-
-	// --- FASE 1: CONFIGURACION (Modo Silencio) ---
-	SysTick->CTRL &= ~(1 << 0); // Apagar SysTick (LCD Congelado)
+	SysTick->CTRL &= ~(1 << 0); // Apagar LCD/SysTick
 	bool configOk = miNfc.SAMConfig();
-	SysTick->CTRL |= (1 << 0);  // Encender SysTick (LCD Activo)
+	SysTick->CTRL |= (1 << 0);  // Encender LCD/SysTick
 
-	// 1. Configurar Modulo
-	if (configOk) { // O sendCommand() si no lo renombraste
-		L2.On(); // Configurado OK
-		lcd->Set("Listo!          ", 1, 0);
+	if (configOk) {
+		L2.On();
+		actualizarPantalla("Sistema NFC     ", "Listo!          ");
+		delay_aprox(TIEMPO_VISUALIZACION);
+		L2.Off();
 	} else {
-		L3.On(); // Fallo Config
-		while(1); // Detener
+		L3.On();
+		actualizarPantalla("Error Config", "Reinicie Sistema");
+		while(1);
 	}
 
+	// Variables de trabajo
 	uint8_t uid[7];
 	uint8_t uidLen;
-	char hexStr[5]; // Buffer para texto "[XX]"
 	char lcdBuffer[17];
+	EstadoSistema estado = ESTADO_ESPERANDO;
+	bool mensajeMostrado = false; // Flag para no refrescar LCD innecesariamente
 
-	while(1){
-		// A. LIMPIEZA PREVENTIVA
-		// Antes de pedir nada, borramos cualquier basura vieja del buffer.
-		// Esto evita que se acumulen bytes hasta dar el error m_rxDropped.
-		miUart.clearRxBuffer();
+	while(1) {
+		switch(estado) {
 
-		// B. APAGAR INTERRUPCIONES LCD
-		// Necesitamos toda la atención en la UART para no perder ni un bit.
-		SysTick->CTRL &= ~(1 << 0);
+			// --- ESTADO 1: ESPERANDO TARJETA ---
+			case ESTADO_ESPERANDO:
+				if (!mensajeMostrado) {
+					actualizarPantalla("Acerque Tarjeta ", "                ");
+					mensajeMostrado = true;
+				}
 
-		// C. INTENTAR LEER TARJETA
-		bool cardFound = miNfc.readPassiveTargetID(0x00, uid, &uidLen);
+				// Preparar lectura NFC
+				miUart.clearRxBuffer();
+				SysTick->CTRL &= ~(1 << 0); // Apagar interrupciones (Modo Atómico)
 
-		// D. ENCENDER INTERRUPCIONES LCD
-		// Ya terminamos de usar la UART intensiva, prendemos para refrescar pantalla
-		SysTick->CTRL |= (1 << 0);
+				if (miNfc.readPassiveTargetID(0x00, uid, &uidLen)) {
+					// ¡Tarjeta encontrada!
+					estado = ESTADO_VALIDANDO;
+					mensajeMostrado = false;
+				} else {
+					// No hay tarjeta, reactivamos SysTick brevemente para refrescar display si hiciera falta
+					// y hacemos un pequeño delay para no saturar
+					SysTick->CTRL |= (1 << 0);
+					delay_aprox(TIEMPO_LECTURA_NFC);
+				}
+				break;
 
-		if (cardFound) {
-			// Procesar datos
-			formatUidForLcd(uid, uidLen, lcdBuffer);
-			L4.Blink();
 
-			// Mostrar en LCD
-			lcd->Set("UID Detectado:  ", 0, 0);
-			lcd->Set(lcdBuffer, 1, 0);
+			// --- ESTADO 2: VALIDANDO TARJETA ---
+			case ESTADO_VALIDANDO:
+				SysTick->CTRL |= (1 << 0); // Reactivar LCD para mostrar info
 
-			// Delay visual (Con SysTick prendido para que el LCD se vea)
-			for(volatile int i=0; i<4000000; i++);
+				// Verificar si es Admin
+				if (controlAcceso.esAdmin(uid, uidLen)) {
+					L4.Blink();
+					actualizarPantalla("MODO ADMIN      ", "Suelte Tarjeta..");
+					delay_aprox(TIEMPO_ESPERA_ADMIN); // Dar tiempo a quitar la tarjeta
+					estado = ESTADO_GESTION_USER;
+				}
+				else {
+					// Usuario Normal
+					bool accesoPermitido = controlAcceso.validarAcceso(uid, uidLen);
+					formatUidForLcd(uid, uidLen, lcdBuffer);
 
-			// Restaurar pantalla
-			lcd->Set("Acerque Tarjeta ", 0, 0);
-			lcd->Set("                ", 1, 0);
-			L4.Off();
-		}
-		else {
-			// Si no hay tarjeta, esperamos un poco antes de preguntar de nuevo.
-			// Es vital que este delay sea corto o inexistente si el buffer se llena rápido,
-			// pero como limpiamos el buffer al inicio del while, estamos seguros.
-			for(volatile int i=0; i<500000; i++);
+					// Mostrar UID
+					actualizarPantalla("MODO ADMIN      ", "Suelte Tarjeta..");
+					lcd->Set("UID:", 0, 0);
+					lcd->Set(lcdBuffer, 0, 5);
+
+					if (accesoPermitido) {
+						L2.On();
+						lcd->Set("ACCESO CONCEDIDO", 1, 0);
+					} else {
+						L3.On();
+						lcd->Set("ACCESO DENEGADO ", 1, 0);
+					}
+
+					// Esperar para que el usuario lea
+					delay_aprox(TIEMPO_VISUALIZACION);
+
+					// Limpieza
+					L2.Off(); L3.Off();
+					estado = ESTADO_ESPERANDO;
+				}
+				break;
+
+
+			// --- ESTADO 3: AGREGANDO NUEVO USUARIO ---
+			case ESTADO_GESTION_USER:
+				actualizarPantalla("MODO ADMIN      ", "Acerque Nueva...");
+
+				int intentos = TIMEOUT_NUEVA_TARJETA;
+				bool tarjetaDetectada = false;
+
+				while (intentos > 0 && !tarjetaDetectada) {
+					miUart.clearRxBuffer();
+					SysTick->CTRL &= ~(1 << 0); // Silencio
+
+					if (miNfc.readPassiveTargetID(0x00, uid, &uidLen)) {
+						tarjetaDetectada = true;
+					}
+
+					SysTick->CTRL |= (1 << 0); // LCD ON
+
+					if (!tarjetaDetectada) {
+						delay_aprox(TIEMPO_LECTURA_NFC);
+						intentos--;
+					}
+				}
+
+				if (tarjetaDetectada) {
+					// 1. Verificar si es el mismo ADMIN (Error)
+					if (controlAcceso.esAdmin(uid, uidLen)) {
+						actualizarPantalla("Error:          ", "Es el Admin!    ");
+						L4.Blink();
+					}
+					// 2. Verificar si YA EXISTE (Eliminar)
+					else if (controlAcceso.validarAcceso(uid, uidLen)) {
+						if (controlAcceso.eliminarUsuario(uid, uidLen)) {
+							L3.Blink(); // Rojo parpadea (feedback de borrado)
+							actualizarPantalla("Usuario:        ", "ELIMINADO       ");
+						} else {
+							actualizarPantalla("Error:          ", "No se elimino   ");
+						}
+					}
+					// 3. Si NO EXISTE (Agregar)
+					else {
+						controlAcceso.agregarUsuario(uid, uidLen);
+						L2.Blink(); // Verde parpadea (feedback de guardado)
+						actualizarPantalla("Usuario:        ", "AGREGADO        ");
+					}
+				} else {
+					actualizarPantalla("Tiempo Agotado  ", "Cancelando...   ");
+				}
+
+				delay_aprox(TIEMPO_ESPERA_ADMIN);
+				L2.Off(); L3.Off(); L4.Off();
+				estado = ESTADO_ESPERANDO;
+				mensajeMostrado = false;
+				break;
 		}
 	}
-
 	return 0;
 }

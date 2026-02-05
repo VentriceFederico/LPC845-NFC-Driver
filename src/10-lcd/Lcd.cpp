@@ -189,3 +189,8 @@ void Lcd::callback( void )
 	m_bus[LCD_EN]->ClrPin();
 
 }
+
+
+void Lcd::Clear(){
+	Push(0x01, LCD_CONTROL);
+}
