@@ -16,37 +16,16 @@ void byteToHexAndFormat(uint8_t byte, char* buffer) {
     buffer[4] = '\0'; // Terminador nulo
 }
 
-// Muestra mensaje de error en LCD (sin sprintf para ahorrar memoria)
-void lcdError(uint8_t err) {
-    char buff[5];
-    buff[0] = 'E'; buff[1] = 'r'; buff[2] = 'r';
-    buff[3] = '0' + (err % 10); // Solo ultimo digito para simplificar
-    buff[4] = '\0';
-    lcd->Set(buff, 1, 12); // Mostrar en esquina inferior derecha
-}
-
-void buildErrorMsg(uint8_t err, char* buffer) {
-    const char* prefix = "Err: ";
-    const char* suffix = " (Retry)";
-    uint8_t i = 0;
-
-    // Copiar prefijo "Err: "
-    while (*prefix) buffer[i++] = *prefix++;
-
-    // Convertir número a ASCII (uint8_t 0-255)
-    if (err >= 100) {
-        buffer[i++] = '0' + (err / 100);
-        buffer[i++] = '0' + ((err / 10) % 10);
-    } else if (err >= 10) {
-        buffer[i++] = '0' + (err / 10);
+// Convierte array de bytes a String Hex: {0xDE, 0xAD} -> "DEAD"
+void formatUidForLcd(uint8_t *uid, uint8_t len, char *buffer) {
+    const char hex[] = "0123456789ABCDEF";
+    for(int i=0; i<len; i++) {
+        // Nibble alto
+        buffer[i*2] = hex[(uid[i] >> 4) & 0x0F];
+        // Nibble bajo
+        buffer[i*2+1] = hex[uid[i] & 0x0F];
     }
-    buffer[i++] = '0' + (err % 10);
-
-    // Copiar sufijo " (Retry)"
-    while (*suffix) buffer[i++] = *suffix++;
-
-    // Terminador nulo
-    buffer[i] = '\0';
+    buffer[len*2] = '\0'; // Terminador nulo
 }
 
 Led L2( 0 , Callback_Leds_gpio , 200 ) ;
@@ -66,7 +45,11 @@ int main(void) {
     InicializarInfotronic();
 
     // Apagamos todo
-    L2.Off(); L3.Off(); L4.Blink();
+    L2.Off(); L3.Off(); L4.Off();
+
+    // Mensaje de bienvenida
+	lcd->Set("Sistema NFC", 0, 0);
+	lcd->Set("Iniciando...", 1, 0);
 
 	// 2. Instanciar el objeto UART
 	// uart(num, portTx, pinTx, portRx, pinRx, baudrate)
@@ -78,9 +61,15 @@ int main(void) {
 	for(volatile int i=0; i<500000; i++);
 	miUart.clearRxBuffer();
 
+	// --- FASE 1: CONFIGURACION (Modo Silencio) ---
+	SysTick->CTRL &= ~(1 << 0); // Apagar SysTick (LCD Congelado)
+	bool configOk = miNfc.SAMConfig();
+	SysTick->CTRL |= (1 << 0);  // Encender SysTick (LCD Activo)
+
 	// 1. Configurar Modulo
-	if (miNfc.SAMConfig()) { // O sendCommand() si no lo renombraste
+	if (configOk) { // O sendCommand() si no lo renombraste
 		L2.On(); // Configurado OK
+		lcd->Set("Error Config    ", 1, 0);
 	} else {
 		L3.On(); // Fallo Config
 		while(1); // Detener
@@ -89,32 +78,49 @@ int main(void) {
 	uint8_t uid[7];
 	uint8_t uidLen;
 	char hexStr[5]; // Buffer para texto "[XX]"
+	char lcdBuffer[17];
 
 	while(1){
-	        // 2. Buscar tarjeta (Baudrate 0x00 = ISO14443A / Mifare)
-	        // Esta funcion enviara el comando y esperara respuesta
-	        if (miNfc.readPassiveTargetID(0x00, uid, &uidLen)) {
+		// A. LIMPIEZA PREVENTIVA
+		// Antes de pedir nada, borramos cualquier basura vieja del buffer.
+		// Esto evita que se acumulen bytes hasta dar el error m_rxDropped.
+		miUart.clearRxBuffer();
 
-	            // ¡TARJETA ENCONTRADA! -> Prender L4 fugazmente
-	            L4.On();
+		// B. APAGAR INTERRUPCIONES LCD
+		// Necesitamos toda la atención en la UART para no perder ni un bit.
+		SysTick->CTRL &= ~(1 << 0);
 
-	            miUart.Transmit("\r\nUID: ");
+		// C. INTENTAR LEER TARJETA
+		bool cardFound = miNfc.readPassiveTargetID(0x00, uid, &uidLen);
 
-	            // Imprimir el UID byte por byte
-	            for (uint8_t i = 0; i < uidLen; i++) {
-	                byteToHexAndFormat(uid[i], hexStr);
-	                miUart.Transmit(hexStr);
-	                miUart.Transmit(" ");
-	            }
+		// D. ENCENDER INTERRUPCIONES LCD
+		// Ya terminamos de usar la UART intensiva, prendemos para refrescar pantalla
+		SysTick->CTRL |= (1 << 0);
 
-	            // Esperar un poco para no spamear la UART (y dar tiempo a quitar la tarjeta)
-	            for(volatile int i=0; i<2000000; i++);
-	            L4.Off();
-	        }
-	        else {
-	            // No hay tarjeta, seguimos buscando...
-	        }
-	    }
+		if (cardFound) {
+			// Procesar datos
+			formatUidForLcd(uid, uidLen, lcdBuffer);
+			L4.Blink();
+
+			// Mostrar en LCD
+			lcd->Set("UID Detectado:  ", 0, 0);
+			lcd->Set(lcdBuffer, 1, 0);
+
+			// Delay visual (Con SysTick prendido para que el LCD se vea)
+			for(volatile int i=0; i<4000000; i++);
+
+			// Restaurar pantalla
+			lcd->Set("Acerque Tarjeta ", 0, 0);
+			lcd->Set("                ", 1, 0);
+			L4.Off();
+		}
+		else {
+			// Si no hay tarjeta, esperamos un poco antes de preguntar de nuevo.
+			// Es vital que este delay sea corto o inexistente si el buffer se llena rápido,
+			// pero como limpiamos el buffer al inicio del while, estamos seguros.
+			for(volatile int i=0; i<500000; i++);
+		}
+	}
 
 	return 0;
 }
