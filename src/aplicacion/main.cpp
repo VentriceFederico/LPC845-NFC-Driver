@@ -35,6 +35,8 @@ Led L4( 2 , Callback_Leds_gpio , 300 ) ;
 #define MAX_BUFFER 64
 uint8_t rxBuffer[MAX_BUFFER];
 uint8_t rxIndex = 0;
+// Clave por defecto de fábrica (FF FF FF FF FF FF)
+uint8_t KEY_DEFAULT[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
 // Estado simple para detectar tramas
 enum Estado_t { ESPERANDO_00_1, ESPERANDO_00_2, RECIBIENDO_DATOS };
@@ -69,7 +71,7 @@ int main(void) {
 	// 1. Configurar Modulo
 	if (configOk) { // O sendCommand() si no lo renombraste
 		L2.On(); // Configurado OK
-		lcd->Set("Error Config    ", 1, 0);
+		lcd->Set("Listo!          ", 1, 0);
 	} else {
 		L3.On(); // Fallo Config
 		while(1); // Detener

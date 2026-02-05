@@ -6,6 +6,9 @@
 // Comandos
 #define PN532_COMMAND_SAMCONFIGURATION      0x14
 #define PN532_COMMAND_INLISTPASSIVETARGET   0x4A
+#define PN532_COMMAND_INDATAEXCHANGE        0x40
+#define MIFARE_CMD_AUTH_A                   0x60
+#define MIFARE_CMD_READ                     0x30
 
 // Constantes de Protocolo
 #define PN532_PREAMBLE                      0x00
@@ -37,6 +40,8 @@ public:
     // Configuración específica (SAM)
 	bool SAMConfig();
 	bool readPassiveTargetID(uint8_t cardbaudrate, uint8_t *uid, uint8_t *uidLength, uint16_t timeout = 1000);
+	bool authenticateBlock(uint8_t *uid, uint8_t uidLen, uint32_t blockNumber, uint8_t *keyData);
+	bool readDataBlock(uint8_t blockNumber, uint8_t *data);
 };
 
 #endif /* SRC_13_NFC_NFC_H_ */

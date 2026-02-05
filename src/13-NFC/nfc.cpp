@@ -228,3 +228,80 @@ bool Nfc::readPassiveTargetID(uint8_t cardbaudrate, uint8_t *uid, uint8_t *uidLe
 
     return true;
 }
+
+bool Nfc::authenticateBlock(uint8_t *uid, uint8_t uidLen, uint32_t blockNumber, uint8_t *keyData) {
+    // Trama de Autenticación Mifare:
+    // CMD (0x40) + Tg (0x01) + AuthCmd (0x60) + Block + Key[6] + UID[4]
+
+    uint8_t cmd[14]; // 1 + 1 + 1 + 1 + 6 + 4 = 14 bytes aprox (ajustamos indice)
+
+    cmd[0] = PN532_COMMAND_INDATAEXCHANGE;
+    cmd[1] = 0x01; // Target 1 (la tarjeta que acabamos de detectar)
+    cmd[2] = MIFARE_CMD_AUTH_A; // Usar Clave A
+    cmd[3] = blockNumber;
+
+    // Copiar Clave (6 bytes)
+    for (uint8_t i = 0; i < 6; i++) cmd[4 + i] = keyData[i];
+
+    // Copiar UID (4 bytes) - El protocolo exige usar el UID para la mezcla crypto
+    // Nota: Si el UID es de 7 bytes, solo se usan los últimos 4 bytes en algunos casos,
+    // pero para Mifare Classic estándar asumimos 4 bytes.
+    for (uint8_t i = 0; i < 4; i++) cmd[10 + i] = uid[i];
+
+    // Enviar comando (14 bytes de payload total)
+    if (!sendCommand(cmd, 14)) return false;
+
+    // Leer respuesta del PN532
+    // Esperamos: D5 41 00 (Status OK)
+    uint8_t response[64];
+    int16_t len = readResponse(response, sizeof(response));
+
+    if (len < 0) return false;
+
+    // Verificar Status byte (response[3] es el byte de status del InDataExchange)
+    // response[0]=LEN, [1]=LCS, [2]=TFI, [3]=CMD+1(41), [4]=STATUS
+    // Ojo: readResponse ya te devuelve el payload limpio desde response[0] = D5?
+    // Revisemos tu readResponse:
+    // if (responseBuff[2] == PN532_PN532TOHOST) ... return len - 1;
+    // Y copia datos desde responseBuff[3].
+    // Entonces response[0] será 0x41 (CMD+1) y response[1] será STATUS.
+
+    if (response[0] != (PN532_COMMAND_INDATAEXCHANGE + 1)) return false;
+
+    if (response[1] != 0x00) {
+        // Status != 0x00 significa error de autenticación (clave incorrecta)
+        return false;
+    }
+
+    return true; // Autenticado exitosamente
+}
+
+bool Nfc::readDataBlock(uint8_t blockNumber, uint8_t *data) {
+    // Trama de Lectura:
+    // CMD (0x40) + Tg (0x01) + ReadCmd (0x30) + Block
+
+    uint8_t cmd[4];
+    cmd[0] = PN532_COMMAND_INDATAEXCHANGE;
+    cmd[1] = 0x01; // Target 1
+    cmd[2] = MIFARE_CMD_READ;
+    cmd[3] = blockNumber;
+
+    if (!sendCommand(cmd, 4)) return false;
+
+    uint8_t response[64];
+    int16_t len = readResponse(response, sizeof(response));
+
+    if (len < 0) return false;
+
+    // Validar respuesta: 0x41 + Status(00) + 16 bytes de datos
+    if (response[0] != (PN532_COMMAND_INDATAEXCHANGE + 1)) return false;
+    if (response[1] != 0x00) return false; // Error de lectura
+
+    // Copiar los 16 bytes de datos al buffer del usuario
+    // Los datos empiezan en response[2]
+    for (uint8_t i = 0; i < 16; i++) {
+        data[i] = response[2 + i];
+    }
+
+    return true;
+}
