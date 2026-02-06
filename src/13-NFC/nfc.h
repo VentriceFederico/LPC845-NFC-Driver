@@ -2,6 +2,7 @@
 #define SRC_13_NFC_NFC_H_
 
 #include "uart.h"
+#include <cstring>
 
 // Comandos
 #define PN532_COMMAND_SAMCONFIGURATION      0x14
@@ -19,7 +20,7 @@
 #define PN532_PN532TOHOST                   0xD5	// Direccion Modulo -> LPC
 
 // Timeout simple para no colgar el programa si el modulo no responde
-#define NFC_TIMEOUT                         100000
+#define NFC_TIMEOUT                         2000000
 
 class Nfc {
 private:
@@ -39,9 +40,10 @@ public:
     bool sendCommand(uint8_t *cmd, uint8_t cmdLen);     // Envia un comando crudo, calcula Checksums y espera el ACK
     // Configuración específica (SAM)
 	bool SAMConfig();
-	bool readPassiveTargetID(uint8_t cardbaudrate, uint8_t *uid, uint8_t *uidLength, uint16_t timeout = 1000);
+	bool readPassiveTargetID(uint8_t cardbaudrate, uint8_t *uid, uint8_t *uidLength, uint8_t *sak = nullptr, uint16_t timeout = 1000);
 	bool authenticateBlock(uint8_t *uid, uint8_t uidLen, uint32_t blockNumber, uint8_t *keyData);
 	bool readDataBlock(uint8_t blockNumber, uint8_t *data);
+	bool negotiateWithPhone(uint8_t* response, uint8_t* responseLen);
 };
 
 #endif /* SRC_13_NFC_NFC_H_ */

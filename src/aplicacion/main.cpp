@@ -5,7 +5,7 @@
 
 // --- DEFINICIONES Y CONSTANTES ---
 #define TIEMPO_LECTURA_NFC     500000  // Pequeña pausa entre lecturas
-#define TIEMPO_VISUALIZACION   4000000 // Tiempo para leer mensajes largos (Acceso OK/NO)
+#define TIEMPO_VISUALIZACION   2000000 // Tiempo para leer mensajes largos (Acceso OK/NO)
 #define TIEMPO_ESPERA_ADMIN    3000000 // Tiempo esperando que el admin quite su tarjeta
 #define TIMEOUT_NUEVA_TARJETA  50      // Intentos para leer nueva tarjeta
 
@@ -108,11 +108,12 @@ int main(void) {
 	}
 
 	// Variables de trabajo
-	uint8_t uid[7];
+	uint8_t uid[4];
 	uint8_t uidLen;
 	char lcdBuffer[17];
 	EstadoSistema estado = ESTADO_ESPERANDO;
 	bool mensajeMostrado = false; // Flag para no refrescar LCD innecesariamente
+	uint8_t sak;
 
 	while(1) {
 		switch(estado) {
@@ -120,22 +121,46 @@ int main(void) {
 			// --- ESTADO 1: ESPERANDO TARJETA ---
 			case ESTADO_ESPERANDO:
 				if (!mensajeMostrado) {
-					actualizarPantalla("Acerque Tarjeta ", "                ");
+					actualizarPantalla("Acerque Tarjeta ", "  o Celular...  ");
+					delay_aprox(TIEMPO_VISUALIZACION);
 					mensajeMostrado = true;
 				}
 
 				// Preparar lectura NFC
 				miUart.clearRxBuffer();
-				SysTick->CTRL &= ~(1 << 0); // Apagar interrupciones (Modo Atómico)
+				SysTick->CTRL &= ~(1 << 0); // LCD OFF
 
-				if (miNfc.readPassiveTargetID(0x00, uid, &uidLen)) {
-					// ¡Tarjeta encontrada!
-					estado = ESTADO_VALIDANDO;
-					mensajeMostrado = false;
+				if (miNfc.readPassiveTargetID(0x00, uid, &uidLen, &sak)) {
+					bool lecturaExitosa = false;
+					if(sak & 0x20){
+						if (miNfc.negotiateWithPhone(uid, &uidLen)) {
+							lecturaExitosa = true;
+							SysTick->CTRL |= (1 << 0); // LCD ON
+							// Opcional: Feedback visual de que detectó celu
+							L4.Blink();
+							actualizarPantalla("Detectando...   ", "Celular...      ");
+							delay_aprox(TIEMPO_VISUALIZACION);
+						} else {
+							SysTick->CTRL |= (1 << 0); // LCD ON
+							actualizarPantalla("Error HCE       ", "Reintente...    ");
+							L3.Blink(); // Luz Roja
+							delay_aprox(TIEMPO_VISUALIZACION); // Pausa para leer el error
+							estado = ESTADO_ESPERANDO;
+							mensajeMostrado = false;
+						}
+					} else {
+						lecturaExitosa = true;
+					}
+
+					if(lecturaExitosa){
+						// ¡Tarjeta encontrada!
+						estado = ESTADO_VALIDANDO;
+						mensajeMostrado = false;
+					} else {
+						delay_aprox(TIEMPO_LECTURA_NFC);
+					}
 				} else {
-					// No hay tarjeta, reactivamos SysTick brevemente para refrescar display si hiciera falta
-					// y hacemos un pequeño delay para no saturar
-					SysTick->CTRL |= (1 << 0);
+					SysTick->CTRL |= (1 << 0);	// LCD ON
 					delay_aprox(TIEMPO_LECTURA_NFC);
 				}
 				break;
@@ -144,6 +169,9 @@ int main(void) {
 			// --- ESTADO 2: VALIDANDO TARJETA ---
 			case ESTADO_VALIDANDO:
 				SysTick->CTRL |= (1 << 0); // Reactivar LCD para mostrar info
+
+				formatUidForLcd(uid, uidLen, lcdBuffer);
+				actualizarPantalla("UID:", lcdBuffer);
 
 				// Verificar si es Admin
 				if (controlAcceso.esAdmin(uid, uidLen)) {
@@ -158,7 +186,7 @@ int main(void) {
 					formatUidForLcd(uid, uidLen, lcdBuffer);
 
 					// Mostrar UID
-					actualizarPantalla("MODO ADMIN      ", "Suelte Tarjeta..");
+					actualizarPantalla("                ", "                ");
 					lcd->Set("UID:", 0, 0);
 					lcd->Set(lcdBuffer, 0, 5);
 
@@ -191,8 +219,14 @@ int main(void) {
 					miUart.clearRxBuffer();
 					SysTick->CTRL &= ~(1 << 0); // Silencio
 
-					if (miNfc.readPassiveTargetID(0x00, uid, &uidLen)) {
-						tarjetaDetectada = true;
+					if (miNfc.readPassiveTargetID(0x00, uid, &uidLen, &sak)) {
+						if (sak & 0x20) {
+							 if (miNfc.negotiateWithPhone(uid, &uidLen)){
+								 tarjetaDetectada = true;
+							 }
+						 } else {
+							 tarjetaDetectada = true;
+						 }
 					}
 
 					SysTick->CTRL |= (1 << 0); // LCD ON
@@ -204,10 +238,12 @@ int main(void) {
 				}
 
 				if (tarjetaDetectada) {
+
+					formatUidForLcd(uid, uidLen, lcdBuffer); // Debug visual
+
 					// 1. Verificar si es el mismo ADMIN (Error)
 					if (controlAcceso.esAdmin(uid, uidLen)) {
 						actualizarPantalla("Error:          ", "Es el Admin!    ");
-						L4.Blink();
 					}
 					// 2. Verificar si YA EXISTE (Eliminar)
 					else if (controlAcceso.validarAcceso(uid, uidLen)) {
@@ -234,6 +270,7 @@ int main(void) {
 				mensajeMostrado = false;
 				break;
 		}
+	L2.Off(); L3.Off(); L4.Off();
 	}
 	return 0;
 }

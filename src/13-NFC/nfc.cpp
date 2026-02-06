@@ -1,5 +1,17 @@
 #include "nfc.h"
 
+// AID (Application ID) que buscaremos en el celular.
+// La App de Android debe estar configurada para escuchar este MISMO ID.
+const uint8_t SELECT_APDU[] = {
+    0x00, /* CLA */
+    0xA4, /* INS (Select) */
+    0x04, /* P1  (By Name) */
+    0x00, /* P2 */
+    0x07, /* Length del AID (7 bytes) */
+    0xF0, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, /* EL AID */
+    0x00  /* Le (Esperamos respuesta) */
+};
+
 Nfc::Nfc(uart* uart_instance) {
     m_uart = uart_instance;
     wakeUp();
@@ -140,7 +152,7 @@ int16_t Nfc::readResponse(uint8_t *responseBuff, uint8_t maxLen) {
 
                 case READ_DATA:
                     // Aca leemos el resto: LEN, LCS, TFI, DATA..., DCS, POST
-                    // Simplificacion: guardamos todo en buffer y luego parseamos
+                    // Simplificacion: guardamos to do en buffer y luego parseamos
                     // O procesamos al vuelo como en tu main.
 
                     if (idx == 0) len = d; // Primer byte post 00 FF es LEN
@@ -169,7 +181,7 @@ int16_t Nfc::readResponse(uint8_t *responseBuff, uint8_t maxLen) {
     return 0; // Timeout
 }
 
-bool Nfc::readPassiveTargetID(uint8_t cardbaudrate, uint8_t *uid, uint8_t *uidLength, uint16_t timeout) {
+bool Nfc::readPassiveTargetID(uint8_t cardbaudrate, uint8_t *uid, uint8_t *uidLength, uint8_t *sak, uint16_t timeout) {
     // 1. Armar el comando
     // 0x4A: InListPassiveTarget
     // 0x01: MaxTg (Queremos leer solo 1 tarjeta a la vez)
@@ -213,6 +225,10 @@ bool Nfc::readPassiveTargetID(uint8_t cardbaudrate, uint8_t *uid, uint8_t *uidLe
     // Verificamos NbTg (Byte 4). Si es 0, no encontro tarjetas.
     if (response[4] == 0) {
         return false;
+    }
+
+    if(sak != nullptr){
+    	*sak = response[8];
     }
 
     // Leemos la longitud del UID (Byte 9)
@@ -304,4 +320,68 @@ bool Nfc::readDataBlock(uint8_t blockNumber, uint8_t *data) {
     }
 
     return true;
+}
+
+bool Nfc::negotiateWithPhone(uint8_t* responseBuff, uint8_t* responseLen) {
+    uint8_t cmd[30];
+    cmd[0] = 0x40; // Command: InDataExchange
+    cmd[1] = 0x01; // Target 1
+    memcpy(&cmd[2], SELECT_APDU, sizeof(SELECT_APDU));
+
+    // --- NUEVO: BUCLE DE REINTENTOS ---
+    // Intentaremos hasta 3 veces hablar con el celular.
+    // El primer intento suele fallar porque el celular está "despertando".
+
+    // 1. Enviamos el comando (Sin bucle de reintentos)
+	if (!sendCommand(cmd, 15)) return false;
+
+	// 2. Esperamos respuesta
+	uint8_t rxBuffer[64];
+	// Usamos sizeof para asegurar que no desborde, pero confiaremos en el contenido
+	int16_t bytesRecibidos = readResponse(rxBuffer, sizeof(rxBuffer));
+
+	if(bytesRecibidos != (rxBuffer[0] - 1)) return false;
+
+	// 1. Chequeamos TFI (D5) y CMD (41) en posiciones fijas
+	if (rxBuffer[2] != 0xD5 && rxBuffer[3] != 0x41) return false;
+
+	// 2. Chequeamos Status del PN532 (debe ser 00)
+	if (rxBuffer[4] != 0x00) return false;
+
+	// 3. Calculamos índices usando el Byte de Longitud (rxBuffer[0])
+	// Tu trama dice 09. Eso incluye: TFI(1) + CMD(1) + Status(1) + Data(n) + SW(2)
+	uint8_t largoTrama = rxBuffer[0];
+
+	// Los SW1 y SW2 están al final de la trama útil.
+	// Inicio Trama útil = Índice 2 (D5)
+	// Fin Trama útil = Índice 2 + largoTrama
+	// SW1 está en (Inicio + largo - 2) -> 2 + 9 - 2 = 9
+	// SW2 está en (Inicio + largo - 1) -> 2 + 9 - 1 = 10
+	int indexSW1 = 2 + largoTrama - 2;
+	int indexSW2 = 2 + largoTrama - 1;
+
+	uint8_t sw1 = rxBuffer[indexSW1];
+	uint8_t sw2 = rxBuffer[indexSW2];
+
+	// 4. Verificamos que la App contestó OK (90 00)
+	if (sw1 == 0x90 && sw2 == 0x00) {
+
+		// Calculamos cuántos bytes de datos reales hay
+		// Restamos: TFI, CMD, Status (3 bytes) y SW1, SW2 (2 bytes) = 5 bytes de basura
+		int datosUtiles = largoTrama - 5;
+
+		if (datosUtiles <= 0) return false;
+
+		*responseLen = datosUtiles;
+
+		// Protección para no desbordar buffer de salida
+		if (*responseLen > 7) *responseLen = 7;
+
+		// Los datos siempre empiezan en la posición 5 (después del Status 00)
+		memcpy(responseBuff, &rxBuffer[5], *responseLen);
+
+		return true; // ¡SALIMOS FELICES!
+	}
+
+	return false;
 }
