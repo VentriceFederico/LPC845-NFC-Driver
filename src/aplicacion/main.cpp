@@ -11,13 +11,13 @@
 
 // Estados del Sistema
 enum EstadoSistema {
-    ESTADO_ESPERANDO,       // "Acerque Tarjeta..."
-    ESTADO_REPOSO_LECTURA,  // Pequeña pausa no bloqueante si falló lectura
-    ESTADO_VALIDANDO,       // Procesando UID
-    ESTADO_MOSTRANDO_INFO,  // Mostrando resultado (Verde/Rojo) sin bloquear
-    ESTADO_GESTION_USER,    // Lógica de Admin
-    ESTADO_ESPERA_ADMIN,    // Mostrando resultado de Admin sin bloquear
-    ESTADO_TIMEOUT_ADMIN    // Esperando que pase nueva tarjeta en modo admin
+    ESTADO_ESPERANDO_TARJETA,       	// Polling NFC
+    ESTADO_COOLDOWN_LECTURA,        	// Pausa corta si falló
+    ESTADO_ANALIZANDO_UID,          	// Decide si es Admin o Usuario
+    ESTADO_MOSTRANDO_RESULTADO_ACCESO, 	// Mantiene mensaje "Concedido/Denegado"
+    ESTADO_ADMIN_ESPERANDO_RETIRO,  	// Espera que Admin saque tarjeta
+    ESTADO_ADMIN_ESPERANDO_NUEVA,   	// Espera tarjeta para ABM
+    ESTADO_ADMIN_MOSTRANDO_FINAL    	// Muestra "Agregado/Eliminado" o "Cancelado"
 };
 
 
@@ -29,33 +29,16 @@ void actualizarPantalla(const char* l1, const char* l2) {
 	if (l2) lcd->Set(l2, 1, 0);
 }
 
-// Convierte un byte (ej: 0xFA) a texto "[FA]"
-// No usa librerías estándar, costo de memoria casi nulo.
-void byteToHexAndFormat(uint8_t byte, char* buffer) {
-    const char hexChars[] = "0123456789ABCDEF";
-
-    buffer[0] = '[';
-    // Nibble alto (0xFA -> F)
-    buffer[1] = hexChars[(byte >> 4) & 0x0F];
-    // Nibble bajo (0xFA -> A)
-    buffer[2] = hexChars[byte & 0x0F];
-    buffer[3] = ']';
-    buffer[4] = '\0'; // Terminador nulo
-}
-
 // Convierte array de bytes a String Hex: {0xDE, 0xAD} -> "DE:AD"
 void formatUidForLcd(uint8_t *uid, uint8_t len, char *buffer) {
     const char hex[] = "0123456789ABCDEF";
-    int idx = 0; // Índice manual para el buffer de salida
+    int idx = 0;
+
+    if(len > 7) len = 7;
 
     for(int i = 0; i < len; i++) {
-        // Nibble alto (ej: A)
         buffer[idx++] = hex[(uid[i] >> 4) & 0x0F];
-
-        // Nibble bajo (ej: 9)
         buffer[idx++] = hex[uid[i] & 0x0F];
-
-        // Agregamos ":" solo si NO es el último byte
         if (i < (len - 1)) {
             buffer[idx++] = ':';
         }
@@ -98,16 +81,13 @@ int main(void) {
 	// 1. Inicialización
 	InicializarInfotronic();
 	L2.Off(); L3.Off(); L4.Off();
-
 	timer Cronometro(timer::DEC);
-
-    actualizarPantalla("Sistema NFC", "Iniciando...");
+    actualizarPantalla("  Sistema NFC   ", "Iniciando...    ");
 
     // 2. Drivers
 	uart miUart(4, 0, 16, 0, 17, 115200);
 	Nfc miNfc(&miUart);
 	GestorAcceso controlAcceso;
-
 
 	// 3. Configuración PN532
 	miUart.clearRxBuffer();
@@ -126,91 +106,74 @@ int main(void) {
 	}
 
 	// Variables de trabajo
-	uint8_t uid[4];
+	uint8_t uid[12] = {0};
 	uint8_t uidLen;
 	uint8_t sak;
-	char lcdBuffer[17];
+	char lcdBuffer[32] = {0};
+	bool lecturaExitosa = false;
+	bool nuevoUsr = false;
 
-	EstadoSistema estado = ESTADO_ESPERANDO;
-	EstadoSistema estadoSiguiente = ESTADO_ESPERANDO;
-	bool mensajeMostrado = false; // Flag para no refrescar LCD innecesariamente
-
-	bool nuevoUsuarioDetectado = false;
+	actualizarPantalla("Acerque Tarjeta ", "  o Celular...  ");
+	EstadoSistema estado = ESTADO_ESPERANDO_TARJETA;
 
 	while(1) {
 
-		// IMPORTANTE: La librería 'timers' depende del SysTick.
-		// Como quitamos el BloqueoLCD, el SysTick corre siempre y los timers funcionan bien.
-		bool lecturaExitosa = false;
 		switch(estado) {
 
-			// --- 1. BUSCAR TARJETA ---
-			case ESTADO_ESPERANDO:
-				if (!mensajeMostrado) {
-					actualizarPantalla("Acerque Tarjeta ", "  o Celular...  ");
-					mensajeMostrado = true;
-				}
+			// ---------------------------------------------------------
+			// 1. ESPERA ACTIVA (POLLING)
+			// ---------------------------------------------------------
+			case ESTADO_ESPERANDO_TARJETA: {
+				// Nota: La pantalla ya se actualizó antes de entrar a este estado
 
-				// Intentamos leer (Esto dura lo que dure el timeout del PN532, aprox 100ms)
 				miUart.clearRxBuffer();
 				lecturaExitosa = false;
 
 				if (miNfc.readPassiveTargetID(0x00, uid, &uidLen, &sak)) {
 					if (sak & 0x20) {
-						// Es celular
-						if (miNfc.negotiateWithPhone(uid, &uidLen)) {
-							lecturaExitosa = true;
-						}
+						if (miNfc.negotiateWithPhone(uid, &uidLen)) lecturaExitosa = true;
 					} else {
-						// Es tarjeta
 						lecturaExitosa = true;
 					}
 				}
 
 				if (lecturaExitosa) {
-					estado = ESTADO_VALIDANDO;
-					mensajeMostrado = false;
+					// Transición -> ANALIZAR
+					estado = ESTADO_ANALIZANDO_UID;
 				} else {
-					// Si falló, vamos a un reposo NO BLOQUEANTE
+					// Transición -> PAUSA CORTA (Para no saturar)
 					Cronometro = T_REPOSO_LECTURA;
-					estado = ESTADO_REPOSO_LECTURA;
+					estado = ESTADO_COOLDOWN_LECTURA;
 				}
 				break;
+			}
 
-
-			// --- 1.5 PAUSA ENTRE LECTURAS ---
-			case ESTADO_REPOSO_LECTURA:
-				// Si el timer expiró (operator! devuelve false cuando vence, segun tu lib)
-				// OJO: Chequea cómo funciona tu operator!.
-				// Asumo: if (!Cronometro) es "mientras cuenta".
-				// Entonces el else (o validación positiva) es "venció".
-
-				// Opción A: Si tu librería usa `if (Cronometro == 0)` para ver si terminó:
-				// Opción B: Si tu librería usa el operador bool implícito.
-
-				// Usaré esta lógica estándar: "Si NO está contando (!Cronometro da false), entonces terminó"
-				// Ajusta esta línea según tu timer.cpp:
+			// ---------------------------------------------------------
+			// 2. PAUSA CORTA (Debounce/Polling Rate)
+			// ---------------------------------------------------------
+			case ESTADO_COOLDOWN_LECTURA:
 				if (Cronometro == 0) {
-					estado = ESTADO_ESPERANDO;
+					estado = ESTADO_ESPERANDO_TARJETA;
 				}
 				break;
 
-
-			// --- 2. VALIDAR PERMISOS ---
-			case ESTADO_VALIDANDO:
+			// ---------------------------------------------------------
+			// 3. LÓGICA DE DECISIÓN
+			// ---------------------------------------------------------
+			case ESTADO_ANALIZANDO_UID:
 				formatUidForLcd(uid, uidLen, lcdBuffer);
 
 				if (controlAcceso.esAdmin(uid, uidLen)) {
+					// === ES ADMIN ===
 					L4.Blink();
-					actualizarPantalla("MODO ADMIN      ", "Suelte Dispositi");
+					actualizarPantalla("   MODO ADMIN   ", " Suelte Tarjeta ");
 
-					// Esperamos un momento para que saque la tarjeta admin
+					// Configuración para el siguiente estado
 					Cronometro = T_ESPERA_ADMIN;
-					estado = ESTADO_ESPERA_ADMIN;
-					estadoSiguiente = ESTADO_TIMEOUT_ADMIN; // Siguiente paso lógico
+					estado = ESTADO_ADMIN_ESPERANDO_RETIRO;
 				}
 				else {
-					// Usuario Normal
+					// === ES USUARIO ===
 					if (controlAcceso.validarAcceso(uid, uidLen)) {
 						L2.On();
 						actualizarPantalla("ACCESO CONCEDIDO", "                ");
@@ -218,89 +181,98 @@ int main(void) {
 					} else {
 						L3.On();
 						actualizarPantalla("ACCESO DENEGADO ", "                ");
-						lcd->Set(lcdBuffer, 1, 0); // Mostrar UID al denegar
+						lcd->Set(lcdBuffer, 1, 0); // Muestra UID
 						loguearAcceso("DENEGADO", uid, uidLen);
 					}
 
-					// Mostramos el mensaje por 3 segundos
+					// Configuración para el siguiente estado (Visualización)
 					Cronometro = T_VISUALIZACION;
-					estado = ESTADO_MOSTRANDO_INFO;
-					estadoSiguiente = ESTADO_ESPERANDO;
+					estado = ESTADO_MOSTRANDO_RESULTADO_ACCESO;
 				}
 				break;
 
-
-			// --- 3. ESTADO VISUALIZADOR (GENÉRICO) ---
-			// Sirve para congelar un mensaje en pantalla X segundos sin congelar la CPU
-			case ESTADO_MOSTRANDO_INFO:
-			case ESTADO_ESPERA_ADMIN:
+			// ---------------------------------------------------------
+			// 4. DISPLAY DE RESULTADO (USUARIO NORMAL)
+			// ---------------------------------------------------------
+			case ESTADO_MOSTRANDO_RESULTADO_ACCESO:
 				if (Cronometro == 0) {
-					L2.Off(); L3.Off(); L4.Off();
-					estado = estadoSiguiente;
-					mensajeMostrado = false;
+					// Limpieza y vuelta al inicio
+					L2.Off(); L3.Off();
+					actualizarPantalla("Acerque Tarjeta ", "  o Celular...  ");
+					estado = ESTADO_ESPERANDO_TARJETA;
 				}
 				break;
 
+			// ---------------------------------------------------------
+			// 5. FLUJO ADMIN: ESPERAR QUE SAQUE LA TARJETA
+			// ---------------------------------------------------------
+			case ESTADO_ADMIN_ESPERANDO_RETIRO:
+				if (Cronometro == 0) {
+					// Tiempo cumplido, ahora pedimos la nueva
+					actualizarPantalla("   MODO ADMIN   ", "Acerque Nuevo...");
+					L4.On(); // Dejar fijo para indicar "Esperando"
 
-			// --- 4. GESTIÓN ADMIN (Esperando nueva tarjeta) ---
-			case ESTADO_TIMEOUT_ADMIN:
-				if (!mensajeMostrado) {
-					actualizarPantalla("MODO ADMIN      ", "Acerque Nuevo...");
-					Cronometro = T_TIMEOUT_ADMIN; // 5 segundos para acercar algo
-					mensajeMostrado = true;
-					nuevoUsuarioDetectado = false;
+					Cronometro = T_TIMEOUT_ADMIN;
+					estado = ESTADO_ADMIN_ESPERANDO_NUEVA;
 				}
+				break;
 
-				// Chequeamos Timer de Salida
+			// ---------------------------------------------------------
+			// 6. FLUJO ADMIN: ESPERAR NUEVA TARJETA O TIMEOUT
+			// ---------------------------------------------------------
+			case ESTADO_ADMIN_ESPERANDO_NUEVA:
+				// A. Chequeo de Timeout
 				if (Cronometro == 0) {
 					actualizarPantalla("Tiempo Agotado  ", " Cancelando...  ");
-					Cronometro = T_VISUALIZACION;
-					estado = ESTADO_MOSTRANDO_INFO;
-					estadoSiguiente = ESTADO_ESPERANDO;
+					L4.Off();
+
+					Cronometro = T_VISUALIZACION; // Tiempo para leer "Cancelando"
+					estado = ESTADO_ADMIN_MOSTRANDO_FINAL;
 					break;
 				}
 
-				// Intentamos leer (Polling rápido)
+				// B. Chequeo de Lectura
 				miUart.clearRxBuffer();
-				if (miNfc.readPassiveTargetID(0x00, uid, &uidLen, &sak)) {
-					// Nota: Aquí simplifiqué la lógica celular/tarjeta para el ejemplo
-					// pero deberías usar la misma negociación que arriba si quieres soportar Celus.
-					 if (sak & 0x20) {
-						 if (miNfc.negotiateWithPhone(uid, &uidLen)) nuevoUsuarioDetectado = true;
-					 } else {
-						 nuevoUsuarioDetectado = true;
-					 }
+				nuevoUsr = false;
+				// Lectura rápida (simplificada sin negotiate para este paso)
+				if (miNfc.readPassiveTargetID(0x00, uid, &uidLen, &sak)) nuevoUsr = true;
+				if (sak & 0x20){
+					miNfc.negotiateWithPhone(uid, &uidLen);
 				}
+				if (nuevoUsr) {
+					// PROCESAMIENTO ABM (Alta/Baja)
+					formatUidForLcd(uid, uidLen, lcdBuffer);
 
-				if (nuevoUsuarioDetectado) {
-					estado = ESTADO_GESTION_USER; // Vamos a procesar
+					if (controlAcceso.esAdmin(uid, uidLen)) {
+						 actualizarPantalla("Error:          ", "Es el Admin!    ");
+					}
+					else if (controlAcceso.validarAcceso(uid, uidLen)) {
+						controlAcceso.eliminarUsuario(uid, uidLen);
+						L3.Blink();
+						actualizarPantalla("Usuario:        ", "ELIMINADO       ");
+					} else {
+						controlAcceso.agregarUsuario(uid, uidLen);
+						L2.Blink();
+						actualizarPantalla("Usuario:        ", "AGREGADO        ");
+					}
+
+					// Configuración para mostrar resultado
+					L4.Off();
+					Cronometro = T_ESPERA_ADMIN; // Un poco más de tiempo para ver que pasó
+					estado = ESTADO_ADMIN_MOSTRANDO_FINAL;
 				}
 				break;
 
-
-			// --- 5. PROCESAR ALTA/BAJA ---
-			case ESTADO_GESTION_USER:
-				// Aquí ya tenemos el UID nuevo en la variable 'uid'
-				formatUidForLcd(uid, uidLen, lcdBuffer);
-
-				if (controlAcceso.esAdmin(uid, uidLen)) {
-					actualizarPantalla("Error:          ", "  Es el Admin!  ");
+			// ---------------------------------------------------------
+			// 7. DISPLAY FINAL DE ADMIN (Agregado/Borrado/Cancelado)
+			// ---------------------------------------------------------
+			case ESTADO_ADMIN_MOSTRANDO_FINAL:
+				if (Cronometro == 0) {
+					// Vuelta a casa
+					L2.Off(); L3.Off(); L4.Off();
+					actualizarPantalla("Acerque Tarjeta ", "  o Celular...  ");
+					estado = ESTADO_ESPERANDO_TARJETA;
 				}
-				else if (controlAcceso.validarAcceso(uid, uidLen)) {
-					controlAcceso.eliminarUsuario(uid, uidLen);
-					L3.Blink();
-					actualizarPantalla("Usuario:         ", "   ELIMINADO    ");
-				}
-				else {
-					controlAcceso.agregarUsuario(uid, uidLen);
-					L2.Blink();
-					actualizarPantalla("Usuario:         ", "    AGREGADO    ");
-				}
-
-				// Mostramos resultado y volvemos al inicio
-				Cronometro = T_ESPERA_ADMIN;
-				estado = ESTADO_MOSTRANDO_INFO;
-				estadoSiguiente = ESTADO_ESPERANDO;
 				break;
 		}
 	}
