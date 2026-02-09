@@ -4,24 +4,24 @@
 #include "14-GestorAcceso/GestorAcceso.h"
 
 // --- DEFINICIONES Y CONSTANTES ---
-#define T_VISUALIZACION   30  // 3.0 Segundos (Mensajes ACCESO/ERROR)
-#define T_ESPERA_ADMIN    40  // 4.0 Segundos (Mensajes Admin)
-#define T_REPOSO_LECTURA  2   // 0.2 Segundos (Pausa entre intentos fallidos)
-#define T_TIMEOUT_ADMIN   50  // 5.0 Segundos (Tiempo máx para pasar tarjeta nueva)
+#define T_VISUALIZACION   	30  // 3.0 Segundos (Mensajes ACCESO/ERROR)
+#define T_ESPERA_ADMIN    	20  // 4.0 Segundos (Mensajes Admin)
+#define T_REPOSO_LECTURA  	2   // 0.2 Segundos (Pausa entre intentos fallidos)
+#define T_TIMEOUT_ADMIN   	50  // 5.0 Segundos (Tiempo máx para pasar tarjeta nueva)
+#define T_ESPERA_PC  		10
 
 // Estados del Sistema
 enum EstadoSistema {
     ESTADO_ESPERANDO_TARJETA,       	// Polling NFC
     ESTADO_COOLDOWN_LECTURA,        	// Pausa corta si falló
     ESTADO_ANALIZANDO_UID,          	// Decide si es Admin o Usuario
+	ESTADO_CONSULTANDO_PC,				// Consulta si el usuario tiene acceso
     ESTADO_MOSTRANDO_RESULTADO_ACCESO, 	// Mantiene mensaje "Concedido/Denegado"
     ESTADO_ADMIN_ESPERANDO_RETIRO,  	// Espera que Admin saque tarjeta
     ESTADO_ADMIN_ESPERANDO_NUEVA,   	// Espera tarjeta para ABM
+	ESTADO_ADMIN_CONSULTANDO_PC,		// Consulta si se agrego o borro usuario
     ESTADO_ADMIN_MOSTRANDO_FINAL    	// Muestra "Agregado/Eliminado" o "Cancelado"
 };
-
-
-uart uartPC(1, 0, 18, 0, 19, 9600);
 
 // Función segura para actualizar LCD asegurando que el mensaje salga
 void actualizarPantalla(const char* l1, const char* l2) {
@@ -50,32 +50,8 @@ Led L2( 0 , Callback_Leds_gpio , 200 ) ;
 Led L3( 1 , Callback_Leds_gpio , 100 ) ;
 Led L4( 2 , Callback_Leds_gpio , 300 ) ;
 
-// Envía los datos por partes para no usar sprintf y ahorrar memoria Flash
-void loguearAcceso(const char* estado, uint8_t* uid, uint8_t len) {
-    char uidStr[32];
-
-    // 1. Convertimos el UID a texto
-    formatUidForLcd(uid, len, uidStr);
-
-    // 2. Enviamos las partes por separado directamente a la UART
-    // Parte 1: Cabecera
-    const char* p1 = "ACCESO: ";
-    uartPC.Transmit(p1, strlen(p1));
-
-    // Parte 2: El Estado (CONCEDIDO / DENEGADO)
-    uartPC.Transmit(estado, strlen(estado));
-
-    // Parte 3: Separador
-    const char* p3 = " | UID: ";
-    uartPC.Transmit(p3, strlen(p3));
-
-    // Parte 4: El UID
-    uartPC.Transmit(uidStr, strlen(uidStr));
-
-    // Parte 5: Nueva linea
-    const char* p5 = "\r\n";
-    uartPC.Transmit(p5, strlen(p5));
-}
+char respuestaPC = 0;
+uart uartPC(1, 0, 18, 0, 19, 9600);
 
 int main(void) {
 	// 1. Inicialización
@@ -87,7 +63,7 @@ int main(void) {
     // 2. Drivers
 	uart miUart(4, 0, 16, 0, 17, 115200);
 	Nfc miNfc(&miUart);
-	GestorAcceso controlAcceso;
+	GestorAcceso controlAcceso(&uartPC);
 
 	// 3. Configuración PN532
 	miUart.clearRxBuffer();
@@ -109,6 +85,7 @@ int main(void) {
 	uint8_t uid[12] = {0};
 	uint8_t uidLen;
 	uint8_t sak;
+	uint8_t rxByte = 0;
 	char lcdBuffer[32] = {0};
 	bool lecturaExitosa = false;
 	bool nuevoUsr = false;
@@ -124,7 +101,6 @@ int main(void) {
 			// 1. ESPERA ACTIVA (POLLING)
 			// ---------------------------------------------------------
 			case ESTADO_ESPERANDO_TARJETA: {
-				// Nota: La pantalla ya se actualizó antes de entrar a este estado
 
 				miUart.clearRxBuffer();
 				lecturaExitosa = false;
@@ -138,10 +114,8 @@ int main(void) {
 				}
 
 				if (lecturaExitosa) {
-					// Transición -> ANALIZAR
 					estado = ESTADO_ANALIZANDO_UID;
 				} else {
-					// Transición -> PAUSA CORTA (Para no saturar)
 					Cronometro = T_REPOSO_LECTURA;
 					estado = ESTADO_COOLDOWN_LECTURA;
 				}
@@ -164,35 +138,46 @@ int main(void) {
 				formatUidForLcd(uid, uidLen, lcdBuffer);
 
 				if (controlAcceso.esAdmin(uid, uidLen)) {
-					// === ES ADMIN ===
 					L4.Blink();
 					actualizarPantalla("   MODO ADMIN   ", " Suelte Tarjeta ");
-
-					// Configuración para el siguiente estado
 					Cronometro = T_ESPERA_ADMIN;
 					estado = ESTADO_ADMIN_ESPERANDO_RETIRO;
 				}
 				else {
-					// === ES USUARIO ===
-					if (controlAcceso.validarAcceso(uid, uidLen)) {
-						L2.On();
-						actualizarPantalla("ACCESO CONCEDIDO", "                ");
-						loguearAcceso("CONCEDIDO", uid, uidLen);
-					} else {
-						L3.On();
-						actualizarPantalla("ACCESO DENEGADO ", "                ");
-						lcd->Set(lcdBuffer, 1, 0); // Muestra UID
-						loguearAcceso("DENEGADO", uid, uidLen);
-					}
+					// 2. CHEQUEO USUARIO
+					actualizarPantalla("Consultando...", "Espere...");
 
-					// Configuración para el siguiente estado (Visualización)
-					Cronometro = T_VISUALIZACION;
-					estado = ESTADO_MOSTRANDO_RESULTADO_ACCESO;
+					controlAcceso.enviarSolicitudAcceso(uid, uidLen);
+
+					Cronometro = T_ESPERA_PC;
+					estado = ESTADO_CONSULTANDO_PC;
 				}
 				break;
 
 			// ---------------------------------------------------------
-			// 4. DISPLAY DE RESULTADO (USUARIO NORMAL)
+			// 4. ESPERA ACTIVA
+			// ---------------------------------------------------------
+			case ESTADO_CONSULTANDO_PC:
+				if (Cronometro == 0) {
+					L3.On();
+					actualizarPantalla("  Error de Red  ", " PC No Responde ");
+					Cronometro = T_VISUALIZACION;
+					estado = ESTADO_MOSTRANDO_RESULTADO_ACCESO;
+				}
+				else if (controlAcceso.leerRespuesta(respuestaPC)) {
+					if (respuestaPC == '1') {
+						L2.On();
+						actualizarPantalla(" ACCESO ONLINE  ", "   CONCEDIDO    ");
+					} else {
+						L3.On();
+						actualizarPantalla(" ACCESO ONLINE  ", "    DENEGADO    ");
+					}
+					Cronometro = T_VISUALIZACION;
+					estado = ESTADO_MOSTRANDO_RESULTADO_ACCESO;
+				}
+				break;
+			// ---------------------------------------------------------
+			// 5. DISPLAY DE RESULTADO (USUARIO NORMAL)
 			// ---------------------------------------------------------
 			case ESTADO_MOSTRANDO_RESULTADO_ACCESO:
 				if (Cronometro == 0) {
@@ -204,7 +189,7 @@ int main(void) {
 				break;
 
 			// ---------------------------------------------------------
-			// 5. FLUJO ADMIN: ESPERAR QUE SAQUE LA TARJETA
+			// 6. FLUJO ADMIN: ESPERAR QUE SAQUE LA TARJETA
 			// ---------------------------------------------------------
 			case ESTADO_ADMIN_ESPERANDO_RETIRO:
 				if (Cronometro == 0) {
@@ -218,7 +203,7 @@ int main(void) {
 				break;
 
 			// ---------------------------------------------------------
-			// 6. FLUJO ADMIN: ESPERAR NUEVA TARJETA O TIMEOUT
+			// 7. FLUJO ADMIN: ESPERAR NUEVA TARJETA O TIMEOUT
 			// ---------------------------------------------------------
 			case ESTADO_ADMIN_ESPERANDO_NUEVA:
 				// A. Chequeo de Timeout
@@ -240,31 +225,41 @@ int main(void) {
 					miNfc.negotiateWithPhone(uid, &uidLen);
 				}
 				if (nuevoUsr) {
-					// PROCESAMIENTO ABM (Alta/Baja)
-					formatUidForLcd(uid, uidLen, lcdBuffer);
+					actualizarPantalla(" Procesando...  ", " Consulte a PC  ");
 
-					if (controlAcceso.esAdmin(uid, uidLen)) {
-						 actualizarPantalla("Error:          ", "Es el Admin!    ");
-					}
-					else if (controlAcceso.validarAcceso(uid, uidLen)) {
-						controlAcceso.eliminarUsuario(uid, uidLen);
-						L3.Blink();
-						actualizarPantalla("Usuario:        ", "ELIMINADO       ");
-					} else {
-						controlAcceso.agregarUsuario(uid, uidLen);
-						L2.Blink();
-						actualizarPantalla("Usuario:        ", "AGREGADO        ");
-					}
+					controlAcceso.enviarSolicitudGestion(uid, uidLen);
 
-					// Configuración para mostrar resultado
-					L4.Off();
-					Cronometro = T_ESPERA_ADMIN; // Un poco más de tiempo para ver que pasó
-					estado = ESTADO_ADMIN_MOSTRANDO_FINAL;
+					Cronometro = T_ESPERA_PC;
+					estado = ESTADO_ADMIN_CONSULTANDO_PC;
 				}
 				break;
-
 			// ---------------------------------------------------------
-			// 7. DISPLAY FINAL DE ADMIN (Agregado/Borrado/Cancelado)
+			// 8. ADMIN: ESPERA RESPUESTA
+			// ---------------------------------------------------------
+			case ESTADO_ADMIN_CONSULTANDO_PC:
+				 if (Cronometro == 0) {
+					actualizarPantalla("Error PC", "Sin Respuesta");
+					L4.Off();
+					Cronometro = T_ESPERA_ADMIN;
+					estado = ESTADO_ADMIN_MOSTRANDO_FINAL;
+				 }
+				 else if (controlAcceso.leerRespuesta(respuestaPC)) {
+					 if (respuestaPC == 'A') {
+						 L2.Blink();
+						 actualizarPantalla(" PC Base Datos: ", "  AGREGADO OK   ");
+					 } else if (respuestaPC == 'B') {
+						 L3.Blink();
+						 actualizarPantalla(" PC Base Datos: ", "  ELIMINADO OK  ");
+					 } else {
+						 actualizarPantalla("    Error PC    ", "  Desconocido   ");
+					 }
+					 L4.Off();
+					 Cronometro = T_ESPERA_ADMIN;
+					 estado = ESTADO_ADMIN_MOSTRANDO_FINAL;
+				 }
+				 break;
+			// ---------------------------------------------------------
+			// 9. DISPLAY FINAL DE ADMIN (Agregado/Borrado/Cancelado)
 			// ---------------------------------------------------------
 			case ESTADO_ADMIN_MOSTRANDO_FINAL:
 				if (Cronometro == 0) {

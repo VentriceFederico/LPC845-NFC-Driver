@@ -7,68 +7,69 @@
 
 #include <14-GestorAcceso/GestorAcceso.h>
 
-GestorAcceso::GestorAcceso() {
-	Usuario admin;
-	admin.len = 4;
-	admin.uid[0] = 0xA9; admin.uid[1] = 0x26; admin.uid[2] = 0xCA; admin.uid[3] = 0x01;
-	admin.esAdmin = true;
-
-	listaAutorizados.push_back(admin);
-
+GestorAcceso::GestorAcceso (uart* uartPC) {
+	m_uartPC = uartPC;
 }
 
 GestorAcceso::~GestorAcceso() {
 	// TODO Auto-generated destructor stub
 }
 
+void GestorAcceso::formatUID(uint8_t* uid, uint8_t len, char* buffer) {
+    const char hex[] = "0123456789ABCDEF";
+    int idx = 0;
+    for(int i = 0; i < len; i++) {
+        buffer[idx++] = hex[(uid[i] >> 4) & 0x0F];
+        buffer[idx++] = hex[uid[i] & 0x0F];
+        if (i < (len - 1)) buffer[idx++] = ':';
+    }
+    buffer[idx] = '\0';
+}
+
 // Metodos Publicos
 
-bool GestorAcceso::validarAcceso(uint8_t* uid, uint8_t len){
-	for(Usuario& u : listaAutorizados){
-		if(u.len != len){
-			continue;
-		}
+void GestorAcceso::enviarSolicitudAcceso(uint8_t* uid, uint8_t len) {
+    char bufferUID[32];
+    formatUID(uid, len, bufferUID);
 
-		if(memcmp(u.uid, uid, len) == 0){
-			return true;
-		}
+    m_uartPC->clearRxBuffer();
+    m_uartPC->Transmit((char*)"REQ:", 4);
+    m_uartPC->Transmit(bufferUID, strlen(bufferUID));
+    m_uartPC->Transmit((char*)"\r\n", 2);
+}
 
-	}
-	return false;
+void GestorAcceso::enviarSolicitudGestion(uint8_t* uid, uint8_t len) {
+    char bufferUID[32];
+    formatUID(uid, len, bufferUID);
+
+    m_uartPC->clearRxBuffer();
+    m_uartPC->Transmit((char*)"ADM:", 4);
+    m_uartPC->Transmit(bufferUID, strlen(bufferUID));
+    m_uartPC->Transmit((char*)"\r\n", 2);
+}
+
+bool GestorAcceso::leerRespuesta(char& respuesta) {
+    uint8_t rxByte;
+    // Usamos tu driver UART que ya es non-blocking
+    if (m_uartPC->Receive(rxByte)) {
+        respuesta = (char)rxByte;
+        return true;
+    }
+    return false;
 }
 
 bool GestorAcceso::esAdmin(uint8_t* uid, uint8_t len){
-	for(Usuario& u : listaAutorizados){
-		if(u.esAdmin && u.len == len && memcmp(u.uid, uid, len) == 0){
-			return true;
+
+	uint8_t uidAdmin[] = {0xFE, 0xDE, 0x19, 0x94}; // UID FIJO PARA EL ADMIN
+
+	if (len != 4){
+		return false;
+	}
+	for(int i=0; i<4; i++) {
+		if (uid[i] != uidAdmin[i]){
+			return false;
 		}
 	}
-	return false;
+	return true;
 }
 
-void GestorAcceso::agregarUsuario(uint8_t* nuevoUid, uint8_t len){
-	if(validarAcceso(nuevoUid, len)){
-		return;
-	}
-
-	Usuario u;
-
-	if (len > 7) len = 7;
-
-	u.len = len;
-	memcpy(u.uid, nuevoUid, len); //Copia bytes
-	u.esAdmin = false;
-
-	listaAutorizados.push_back(u);
-}
-
-int GestorAcceso::cantidadUsuarios(){
-	return listaAutorizados.size();
-}
-
-bool GestorAcceso::eliminarUsuario(uint8_t* uid, uint8_t len){
-	size_t sizeIni = listaAutorizados.size();
-
-	listaAutorizados.erase(std::remove_if(listaAutorizados.begin(), listaAutorizados.end(), [uid](const Usuario& u) {return std::memcmp(u.uid, uid, 4) == 0x00;}), listaAutorizados.end());
-	return listaAutorizados.size() < sizeIni;
-}

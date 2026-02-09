@@ -9,30 +9,23 @@
 #define SRC_14_GESTORACCESO_GESTORACCESO_H_
 
 #include "LPC845.h"
-#include <vector>
 #include <cstring>
-#include <algorithm>
-
-// Estructura para representar una tarjeta/usuario
-struct Usuario {
-    uint8_t uid[4];
-    uint8_t len;
-    bool esAdmin; //Para distinguir Admin de usuarios normales
-};
+#include "uart.h"
 
 class GestorAcceso {
 private:
-	std::vector<Usuario> listaAutorizados;
+	uart* m_uartPC;
+
+	void formatUID(uint8_t* uid, uint8_t len, char* buffer); //Convierte UID a Texto
 
 public:
-	GestorAcceso();
+	GestorAcceso(uart* uartPC);
 	virtual ~GestorAcceso();
 
-	bool validarAcceso(uint8_t* uid, uint8_t len);
-	bool esAdmin(uint8_t* uid, uint8_t len);
-	void agregarUsuario(uint8_t* uid, uint8_t len);
-	bool eliminarUsuario(uint8_t* uid, uint8_t len);
-	int cantidadUsuarios();
+	void 	enviarSolicitudAcceso(uint8_t* uid, uint8_t len);
+	void 	enviarSolicitudGestion(uint8_t* uid, uint8_t len);
+	bool 	leerRespuesta(char& respuesta);
+	bool 	esAdmin(uint8_t* uid, uint8_t len);
 };
 
 #endif /* SRC_14_GESTORACCESO_GESTORACCESO_H_ */
