@@ -118,7 +118,7 @@ bool uart::Transmit(char val) {
 
 bool uart::Transmit(const char * msg) {
     while (*msg) {
-        Transmit(*msg++); // Reutilizamos lógica para simplicidad
+        Transmit(*msg++);
     }
     return true;
 }
@@ -136,7 +136,7 @@ bool uart::Transmit(const uint8_t * frame, uint8_t n) {
 }
 
 // --------------------------------------------------------------------------
-// IRQ HANDLER OPTIMIZADO PARA PREVENIR OVERRUN
+// IRQ HANDLER PARA PREVENIR OVERRUN
 // --------------------------------------------------------------------------
 
 void uart::UART_IRQHandler(void) {
@@ -152,10 +152,8 @@ void uart::UART_IRQHandler(void) {
         stat = m_usart->STAT;            // Refrescamos stat local
     }
 
-    // 2. RECEPCIÓN (RX) - Bucle de drenado rápido
-    // Usamos el registro hardware directamente en el while para máxima velocidad
+    // 2. RECEPCIÓN (RX)
     while ((stat = m_usart->STAT) & DATAREADY) {
-        // Leer RXDATSTAT limpia el flag DATAREADY automáticamente
         uint8_t datoRx = (uint8_t)m_usart->RXDATSTAT;
 
         if (!m_buffRx.pushFromIRQ(datoRx)) {
@@ -174,9 +172,7 @@ void uart::UART_IRQHandler(void) {
         }
     }
 
-    // 4. DOUBLE CHECK RX (Truco Anti-Overrun)
-    // Si mientras atendíamos TX llegó otro byte, lo leemos YA.
-    // Esto evita salir de la ISR y tener que volver a entrar (overhead).
+    // 4. DOUBLE CHECK RX - Si se atendia otra consulta y llego otro byte lo leemos
     if (m_usart->STAT & DATAREADY) {
          uint8_t datoRx = (uint8_t)m_usart->RXDATSTAT;
          if (!m_buffRx.pushFromIRQ(datoRx)) {

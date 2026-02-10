@@ -44,8 +44,6 @@
      volatile bool m_newLineDetected;
      newLineType_t m_newLineType;
 
-     // MÁSCARA MÁGICA: Si N=256 (0x100), Mask=0xFF.
-     // (idx + 1) & 0xFF hace el wrap automático en 1 ciclo de reloj.
      static const uint32_t MASK = N - 1;
 
      inline uint32_t next_index(uint32_t idx) const {
@@ -54,7 +52,7 @@
 
  public:
      ColaCircular() : m_head(0), m_tail(0), m_newLineDetected(false) {
-         // Verificación estática de potencia de 2 (truco de compilador)
+         // Verificacion estatica de potencia de 2 (Se encarga el compilador)
          static_assert((N & (N - 1)) == 0, "El tamaño de ColaCircular debe ser potencia de 2");
 
          m_newLineDetectEnable = false;
@@ -77,10 +75,10 @@
      bool pushFromIRQ(const T &item) {
          uint32_t next = next_index(m_head);
 
-         if (next == m_tail) return false; // Llena
+         if (next == m_tail) return false;
 
          queue[m_head] = item;
-         m_head = next; // Atomic store en 32-bit ARM
+         m_head = next;
 
          if (m_newLineDetectEnable && !m_newLineDetected) {
              if (m_newLineType == LF && item == '\n') m_newLineDetected = true;

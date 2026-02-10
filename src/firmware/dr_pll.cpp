@@ -71,7 +71,22 @@ void Inicializar_PLL( void )
 	SYSCON->SYSPLLCLKUEN             |= 1;        //write a one to SYSPLLUEN register (sec. 3.5.10), necessary for SYSPLLCLKSEL to update
 
 	SYSCON->PDRUNCFG                 |= (1<<7);   //power down the PLL before changing divider values (sec 3.5.35)
-//	SYSCON->SYSPLLCTRL 				 = 0x23; 	  // M=4 P=1  <-- ESTO GENERA 48 MHz
+/*	SYSCON->SYSPLLCTRL 				 = 0x23; 	  //
+
+	Valor escrito: 0x23 (Binario: 0010 0011)
+	0x23:
+		Bits 0-4 (MSEL) = 00011 (Decimal 3).
+		Formula M = MSEL + 1  -> M = 4.
+		Bits 5-6 (PSEL) = 01 (Decimal 1).
+ 	Segun tabla: PSEL 01 equivale a P = 2.
+		El divisor final es 2*P -> Divisor = 4.
+	--- CALCULO DE FRECUENCIA ---
+		Fin (FRO) = 12 MHz (El FRO es 24MHz pero entra dividido por 2 por defecto).
+		Fout = (Fin * M) / (2 * P)
+		Fout = (12 MHz * 4) / 4 = 12 MHz.
+
+	Fin * M = 12 * 4 = 48 MHz
+*/
 	SYSCON->SYSPLLCTRL               = 0x41;      // M=2 P=4 -> Genera 24 MHz
 
 	//main_clk = fro * (M + 1) / P

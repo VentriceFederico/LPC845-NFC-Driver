@@ -67,8 +67,7 @@ class uart
 {
 protected:
 		USART_Type * m_usart;
-
-		// --- CAMBIO CLAVE: Tamaño fijo potencia de 2 (256 bytes) ---
+		//Se definio un tamanio fijo
 		ColaCircular <uint8_t, 256> m_buffRx;
 		ColaCircular <uint8_t, 256> m_buffTx;
 

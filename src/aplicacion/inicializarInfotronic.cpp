@@ -81,7 +81,7 @@ teclado *Teclado;
 
 #endif
 
-// barrido
+// barrido	Se utilizaron para la UART 1
 
 //gpio *rst = (new gpio ( gpio::port0 ,  18 , gpio::pushpull ,  gpio::output , gpio::high )); // RST
 //gpio *clk = (new gpio ( gpio::port0 ,  19 , gpio::pushpull ,  gpio::output , gpio::high )); // CLK

@@ -27,7 +27,6 @@ private:
     uart* m_uart;
     uint8_t m_packetBuffer[64]; // Buffer interno para armar tramas
 
-    // Funciones internas
     uint8_t getChecksum(uint8_t *data, uint8_t len);
     bool readAck(); // Espera el ACK estándar: 00 00 FF 00 FF 00
 

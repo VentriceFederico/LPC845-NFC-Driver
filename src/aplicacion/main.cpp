@@ -85,8 +85,6 @@ int main(void) {
 	uint8_t uid[12] = {0};
 	uint8_t uidLen;
 	uint8_t sak;
-	uint8_t rxByte = 0;
-	char lcdBuffer[32] = {0};
 	bool lecturaExitosa = false;
 	bool nuevoUsr = false;
 
@@ -135,8 +133,6 @@ int main(void) {
 			// 3. LÓGICA DE DECISIÓN
 			// ---------------------------------------------------------
 			case ESTADO_ANALIZANDO_UID:
-				formatUidForLcd(uid, uidLen, lcdBuffer);
-
 				if (controlAcceso.esAdmin(uid, uidLen)) {
 					L4.Blink();
 					actualizarPantalla("   MODO ADMIN   ", " Suelte Tarjeta ");
@@ -145,7 +141,7 @@ int main(void) {
 				}
 				else {
 					// 2. CHEQUEO USUARIO
-					actualizarPantalla("Consultando...", "Espere...");
+					actualizarPantalla(" Consultando... ", "   Espere...    ");
 
 					controlAcceso.enviarSolicitudAcceso(uid, uidLen);
 
@@ -238,7 +234,7 @@ int main(void) {
 			// ---------------------------------------------------------
 			case ESTADO_ADMIN_CONSULTANDO_PC:
 				 if (Cronometro == 0) {
-					actualizarPantalla("Error PC", "Sin Respuesta");
+					actualizarPantalla("    Error PC    ", " Sin Respuesta  ");
 					L4.Off();
 					Cronometro = T_ESPERA_ADMIN;
 					estado = ESTADO_ADMIN_MOSTRANDO_FINAL;
