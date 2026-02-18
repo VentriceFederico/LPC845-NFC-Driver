@@ -215,11 +215,19 @@ int main(void) {
 				// B. Chequeo de Lectura
 				miUart.clearRxBuffer();
 				nuevoUsr = false;
-				// Lectura rápida (simplificada sin negotiate para este paso)
+
 				if (miNfc.readPassiveTargetID(0x00, uid, &uidLen, &sak)) nuevoUsr = true;
 				if (sak & 0x20){
 					miNfc.negotiateWithPhone(uid, &uidLen);
 				}
+
+				if (controlAcceso.esAdmin(uid, uidLen)) {
+					actualizarPantalla(" ERROR ES ADMIN ", " Suelte Tarjeta ");
+					Cronometro = T_VISUALIZACION; // Tiempo para leer "Cancelando"
+					estado = ESTADO_ADMIN_MOSTRANDO_FINAL;
+					break;
+				}
+
 				if (nuevoUsr) {
 					actualizarPantalla(" Procesando...  ", " Consulte a PC  ");
 
